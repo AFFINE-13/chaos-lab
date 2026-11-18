@@ -5,7 +5,7 @@
 
 ## 在线演示
 
-如果已开启 GitHub Pages，访问：`https://<你的用户名>.github.io/<仓库名>/`
+**https://affine-13.github.io/chaos-lab/**
 
 ## 演示列表
 
