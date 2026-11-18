@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>混沌实验室 · Chaos Lab</title>
+<style>
+  :root {
+    --bg: #08080d;
+    --panel: #111119;
+    --panel-hover: #16161f;
+    --line: #222230;
+    --fg: #e9e9f2;
+    --dim: #8b8b9e;
+    --accent: #7aa2ff;
+    --accent-2: #c084fc;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background:
+      radial-gradient(900px 500px at 15% -10%, rgba(122,162,255,.13), transparent 60%),
+      radial-gradient(900px 500px at 85% 0%, rgba(192,132,252,.10), transparent 60%),
+      var(--bg);
+    color: var(--fg);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 72px 24px 96px; }
+  header { margin-bottom: 56px; }
+  .kicker {
+    font-size: 12px; letter-spacing: .22em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 14px;
+  }
+  h1 {
+    font-size: clamp(34px, 5vw, 52px);
+    font-weight: 650; letter-spacing: -.02em; margin: 0 0 16px;
+    background: linear-gradient(100deg, #fff 20%, #9db8ff 60%, #c9a6ff 90%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { color: var(--dim); font-size: 16px; line-height: 1.7; max-width: 620px; margin: 0; }
+  h2 {
+    font-size: 13px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--dim); margin: 48px 0 18px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+  a.card {
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 22px 22px 20px; text-decoration: none; color: inherit;
+    transition: transform .18s ease, border-color .18s ease, background .18s ease;
+  }
+  a.card:hover {
+    transform: translateY(-3px);
+    border-color: #3a3a52;
+    background: var(--panel-hover);
+  }
+  .card h3 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.01em; }
+  .card p { margin: 0; font-size: 13.5px; line-height: 1.65; color: var(--dim); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 8px; }
+  .tag {
+    font-size: 11px; padding: 3px 9px; border-radius: 99px;
+    border: 1px solid var(--line); color: #a7a7bd; background: #0d0d14;
+  }
+  .tag.gpu { color: #8fc7ff; border-color: rgba(143,199,255,.25); }
+  .tag.math { color: #d3b0ff; border-color: rgba(211,176,255,.25); }
+  footer { margin-top: 72px; padding-top: 24px; border-top: 1px solid var(--line); color: #5e5e72; font-size: 12.5px; }
+  footer a { color: var(--dim); }
+  .arrow { color: var(--accent); opacity: 0; transform: translateX(-4px); transition: .18s ease; }
+  a.card:hover .arrow { opacity: 1; transform: translateX(0); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="kicker">Chaos Lab</div>
+    <h1>混沌与动力系统<br>浏览器实验</h1>
+    <p class="lede">一组单文件、零依赖的交互式演示：混沌系统、分形、GPU 粒子模拟与交互实验。全部直接在浏览器中运行，无需安装任何东西。</p>
+  </header>
+
+  <h2>混沌与动力系统</h2>
+  <div class="grid">
+    <a class="card" href="Lorenz吸引子.html">
+      <h3>Lorenz 吸引子 <span class="arrow">→</span></h3>
+      <p>经典蝴蝶效应。两条初始条件几乎相同的轨迹，如何在短时间内彻底分离。</p>
+      <div class="tags"><span class="tag math">微分方程</span><span class="tag">Canvas 2D</span></div>
+    </a>
+    <a class="card" href="Logistic分岔图.html">
+      <h3>Logistic 分岔图 <span class="arrow">→</span></h3>
+      <p>随参数 r 扫描，周期倍化如何一步步走向混沌，以及其中的稳定窗口。</p>
+      <div class="tags"><span class="tag math">离散映射</span><span class="tag">分形结构</span></div>
+    </a>
+    <a class="card" href="双摆混沌演示.html">
+      <h3>双摆混沌 <span class="arrow">→</span></h3>
+      <p>最简单的对初始条件敏感的系统之一：两个双摆的起始角度差一点点，几秒后完全不同。</p>
+      <div class="tags"><span class="tag math">拉格朗日力学</span><span class="tag">实时积分</span></div>
+    </a>
+    <a class="card" href="三体演算.html">
+      <h3>三体演算 <span class="arrow">→</span></h3>
+      <p>牛顿引力下三个天体的相互作用，数值积分展示轨道如何发散与逃逸。</p>
+      <div class="tags"><span class="tag math">N 体问题</span><span class="tag">数值积分</span></div>
+    </a>
+    <a class="card" href="磁摆分形.html">
+      <h3>磁摆分形 <span class="arrow">→</span></h3>
+      <p>三个磁铁 + 一个摆锤，初始位置的细微差别决定最终被哪个磁铁捕获——吸引域的边界是分形。</p>
+      <div class="tags"><span class="tag math">吸引域</span><span class="tag">分形</span></div>
+    </a>
+  </div>
+
+  <h2>GPU 与图形</h2>
+  <div class="grid">
+    <a class="card" href="GPU混沌粒子云.html">
+      <h3>混沌粒子云 · 12 万粒子 <span class="arrow">→</span></h3>
+      <p>12 万个粒子同时在 Lorenz 吸引子中运动，GPU 并行积分呈现出的混沌之美。</p>
+      <div class="tags"><span class="tag gpu">WebGL</span><span class="tag">GPGPU</span></div>
+    </a>
+    <a class="card" href="GPU计算-WebGPU粒子云.html">
+      <h3>WebGPU 计算粒子云 <span class="arrow">→</span></h3>
+      <p>用 WebGPU compute shader 做物理积分与渲染，12 万粒子的下一代显卡加速版本。</p>
+      <div class="tags"><span class="tag gpu">WebGPU</span><span class="tag gpu">Compute Shader</span></div>
+    </a>
+    <a class="card" href="银河系模拟.html">
+      <h3>银河系盘面模拟 <span class="arrow">→</span></h3>
+      <p>密度波模型：旋臂如何从均匀的盘面中自然浮现，恒星在波峰处聚集形成旋涡结构。</p>
+      <div class="tags"><span class="tag">天体模拟</span><span class="tag">密度波</span></div>
+    </a>
+  </div>
+
+  <h2>交互实验</h2>
+  <div class="grid">
+    <a class="card" href="反应速度测试.html">
+      <h3>反应速度测试 <span class="arrow">→</span></h3>
+      <p>经典的毫秒级反应时间测量，附带多轮统计。</p>
+      <div class="tags"><span class="tag">交互</span><span class="tag">计时</span></div>
+    </a>
+    <a class="card" href="灵敏度测试.html">
+      <h3>甩枪灵敏度标定 <span class="arrow">→</span></h3>
+      <p>为 FPS 射击游戏估算合适的鼠标 DPI / 灵敏度，基于瞄准移动轨迹测量。</p>
+      <div class="tags"><span class="tag">交互</span><span class="tag">标定</span></div>
+    </a>
+  </div>
+
+  <footer>
+    所有演示均为单文件 HTML，无外部依赖。代码托管于 GitHub.
+  </footer>
+</div>
+</body>
+</html>

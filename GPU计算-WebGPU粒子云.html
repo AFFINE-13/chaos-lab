@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>WebGPU 计算粒子云 · 12 万粒子</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#02040a; color:#cfe9ff;
+               font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  canvas { display:block; cursor:grab; }
+  canvas:active { cursor:grabbing; }
+  #ui { position:fixed; top:16px; left:18px; background:rgba(6,14,26,.8);
+        border:1px solid rgba(0,190,255,.22); border-radius:10px; padding:12px 15px;
+        font-size:13px; line-height:1.85; backdrop-filter:blur(6px); min-width:255px; }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; color:#7fe3ff; }
+  .row { display:flex; justify-content:space-between; gap:14px; }
+  .k { color:#6b8ba8; } .v { font-variant-numeric:tabular-nums; color:#d7f2ff; }
+  #btns { margin-top:10px; display:flex; gap:8px; }
+  button { background:rgba(0,160,230,.12); border:1px solid rgba(0,190,255,.35);
+           color:#9fe4ff; border-radius:6px; padding:5px 11px; font-size:12px; cursor:pointer; }
+  button:hover { background:rgba(0,190,255,.22); }
+  button.on { background:rgba(0,220,255,.28); color:#eaffff; }
+  #hint { position:fixed; bottom:14px; left:18px; font-size:12px; color:#3f5f78; }
+  #msg { position:fixed; inset:0; display:grid; place-items:center; text-align:center;
+         padding:40px; background:#02040a; font-size:15px; color:#7fe3ff; z-index:20; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>WebGPU 计算粒子云</h1>
+  <div class="row"><span class="k">粒子数</span><span class="v" id="np">—</span></div>
+  <div class="row"><span class="k">积分</span><span class="v">Compute Shader · GPU</span></div>
+  <div class="row"><span class="k">帧率</span><span class="v" id="fps">—</span></div>
+  <div class="row"><span class="k">演化时间</span><span class="v" id="st">0</span></div>
+  <div id="btns">
+    <button id="bSpin" class="on">自动旋转</button>
+    <button id="bReset">重置</button>
+  </div>
+</div>
+<div id="hint">拖动旋转 · 滚轮缩放</div>
+<div id="msg">正在初始化 WebGPU…</div>
+
+<script type="module">
+const N = 120000;
+const DT = 0.004;
+const WORKGROUP = 256;
+
+const canvas = document.getElementById("c");
+const msgEl = document.getElementById("msg");
+
+function fail(t) {
+  msgEl.textContent = t;
+  msgEl.style.display = "grid";
+}
+
+if (!navigator.gpu) {
+  fail("你的浏览器不支持 WebGPU。请用 Chrome / Edge 113 以上版本打开。");
+  throw new Error("no webgpu");
+}
+
+const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+if (!adapter) {
+  fail("找不到可用的 GPU 适配器。可能是显卡驱动过旧，或者浏览器禁用了 WebGPU。");
+  throw new Error("no adapter");
+}
+const device = await adapter.requestDevice();
+
+const ctx = canvas.getContext("webgpu");
+const format = navigator.gpu.getPreferredCanvasFormat();
+ctx.configure({ device, format, alphaMode: "opaque" });
+
+// ---------------------------------------------------------------- 数据
+const data = new Float32Array(N * 4);
+function seedParticles() {
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    data[o]     = (Math.random() - 0.5) * 40;
+    data[o + 1] = (Math.random() - 0.5) * 40;
+    data[o + 2] = Math.random() * 50;
+    data[o + 3] = Math.random();
+  }
+}
+seedParticles();
+
+const particleBuf = device.createBuffer({
+  size: data.byteLength,
+  usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+  mappedAtCreation: true
+});
+new Float32Array(particleBuf.getMappedRange()).set(data);
+particleBuf.unmap();
+
+// ---------------------------------------------------------------- 计算着色器
+const computeWGSL = `
+struct Particle {
+  pos: vec4<f32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+
+const SIGMA: f32 = 10.0;
+const RHO:   f32 = 28.0;
+const BETA:  f32 = ${8 / 3};
+const DT:    f32 = ${DT};
+
+fn lorenz(p: vec3<f32>) -> vec3<f32> {
+  return vec3<f32>(
+    SIGMA * (p.y - p.x),
+    p.x * (RHO - p.z) - p.y,
+    p.x * p.y - BETA * p.z
+  );
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= arrayLength(&particles)) { return; }
+
+  let seed = particles[i].pos.w;
+  var p = particles[i].pos.xyz;
+
+  let k1 = lorenz(p);
+  let k2 = lorenz(p + 0.5 * DT * k1);
+  p = p + DT * k2;
+
+  if (p.x > 60.0 || p.x < -60.0 || p.y > 60.0 || p.y < -60.0 ||
+      p.z > 70.0 || p.z < -10.0) {
+    let f = f32(i);
+    p = vec3<f32>((fract(f * 0.6180339) - 0.5) * 10.0,
+                  (fract(f * 0.3819660) - 0.5) * 10.0,
+                  10.0);
+  }
+
+  particles[i].pos = vec4<f32>(p, seed);
+}
+`;
+
+// ---------------------------------------------------------------- 渲染着色器
+const renderWGSL = `
+struct Particle {
+  pos: vec4<f32>,
+};
+
+@group(0) @binding(0) var<storage, read> particles: array<Particle>;
+
+struct Uni {
+  mvp: mat4x4<f32>,
+  sizePx: f32,
+  pad0: f32,
+  res: vec2<f32>,
+};
+@group(0) @binding(1) var<uniform> u: Uni;
+
+struct VSOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) color: vec3<f32>,
+  @location(1) uv: vec2<f32>,
+  @location(2) glow: f32,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32,
+      @builtin(instance_index) ii: u32) -> VSOut {
+  var corners = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>( 1.0, -1.0), vec2<f32>(-1.0,  1.0),
+    vec2<f32>(-1.0,  1.0), vec2<f32>( 1.0, -1.0), vec2<f32>( 1.0,  1.0)
+  );
+
+  let p = particles[ii].pos;
+  var clip = u.mvp * vec4<f32>(p.xyz, 1.0);
+
+  let c = corners[vi];
+  let offs = c * u.sizePx * 2.0 / u.res * clip.w;
+  clip = vec4<f32>(clip.x + offs.x, clip.y + offs.y, clip.z, clip.w);
+
+  var out: VSOut;
+  out.pos = clip;
+  out.uv = c;
+
+  let t = clamp(p.z / 48.0, 0.0, 1.0);
+  let c1 = vec3<f32>(0.10, 0.62, 1.00);
+  let c2 = vec3<f32>(0.45, 0.28, 1.00);
+  let c3 = vec3<f32>(1.00, 0.24, 0.58);
+  var col = mix(c1, c2, smoothstep(0.0, 0.55, t));
+  col = mix(col, c3, smoothstep(0.55, 1.0, t));
+  col = mix(col, vec3<f32>(0.75, 0.95, 1.0), p.w * 0.30);
+  col = col * (0.75 + p.w * 0.5);
+
+  out.color = col;
+  out.glow = mix(0.5, 1.0, p.w);
+  return out;
+}
+
+@fragment
+fn fs(in: VSOut) -> @location(0) vec4<f32> {
+  let r = length(in.uv);
+  var a = 1.0 - smoothstep(0.0, 1.0, r);
+  a = a * a * in.glow;
+  return vec4<f32>(in.color, a * 0.28);
+}
+`;
+
+const computeModule = device.createShaderModule({ code: computeWGSL });
+const renderModule = device.createShaderModule({ code: renderWGSL });
+
+device.pushErrorScope("validation");
+
+const computePipeline = device.createComputePipeline({
+  layout: "auto",
+  compute: { module: computeModule, entryPoint: "main" }
+});
+
+const renderPipeline = device.createRenderPipeline({
+  layout: "auto",
+  vertex: { module: renderModule, entryPoint: "vs" },
+  fragment: {
+    module: renderModule,
+    entryPoint: "fs",
+    targets: [{
+      format,
+      blend: {
+        color: { srcFactor: "src-alpha", dstFactor: "one", operation: "add" },
+        alpha: { srcFactor: "one", dstFactor: "one", operation: "add" }
+      }
+    }]
+  },
+  primitive: { topology: "triangle-list" }
+});
+
+{
+  const e = await device.popErrorScope();
+  if (e) {
+    fail("WebGPU 管线创建失败：\n" + e.message);
+    throw new Error(e.message);
+  }
+}
+
+device.addEventListener("uncapturederror", ev => {
+  console.error("WebGPU error:", ev.error.message);
+});
+
+// ---------------------------------------------------------------- uniform
+const uniData = new Float32Array(24);   // 96 bytes
+const uniBuf = device.createBuffer({
+  size: uniData.byteLength,
+  usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+});
+
+const computeBindGroup = device.createBindGroup({
+  layout: computePipeline.getBindGroupLayout(0),
+  entries: [{ binding: 0, resource: { buffer: particleBuf } }]
+});
+
+const renderBindGroup = device.createBindGroup({
+  layout: renderPipeline.getBindGroupLayout(0),
+  entries: [
+    { binding: 0, resource: { buffer: particleBuf } },
+    { binding: 1, resource: { buffer: uniBuf } }
+  ]
+});
+
+// ---------------------------------------------------------------- 相机
+let rotY = 0.10, rotX = 1.52, dist = 3.2;
+let dragging = false, lastX = 0, lastY = 0, autoSpin = true;
+const SPIN = 0.012;     // 弧度 / 秒（与刷新率无关）
+
+canvas.addEventListener("mousedown", e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+});
+window.addEventListener("mouseup", () => { dragging = false; });
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  rotY += (e.clientX - lastX) * 0.005;
+  rotX += (e.clientY - lastY) * 0.005;
+  rotX = Math.max(0.2, Math.min(2.6, rotX));
+  lastX = e.clientX; lastY = e.clientY;
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  dist *= (1 + Math.sign(e.deltaY) * 0.08);
+  dist = Math.max(1.6, Math.min(9, dist));
+}, { passive: false });
+
+// ---------------------------------------------------------------- 矩阵
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++)
+    for (let r = 0; r < 4; r++)
+      o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] +
+                     a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+  return o;
+}
+function persp(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return new Float32Array([
+    f / aspect, 0, 0, 0, 0, f, 0, 0,
+    0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0
+  ]);
+}
+const rotXm = a => { const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]); };
+const rotYm = a => { const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]); };
+const trans = (x, y, z) => new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]);
+const scaleM = s => new Float32Array([s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]);
+
+// ---------------------------------------------------------------- 尺寸
+let W = 0, H = 0;
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = Math.floor(window.innerWidth * dpr);
+  H = Math.floor(window.innerHeight * dpr);
+  canvas.width = W; canvas.height = H;
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---------------------------------------------------------------- 预热
+function dispatchCompute(encoder, steps) {
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(computePipeline);
+  pass.setBindGroup(0, computeBindGroup);
+  for (let s = 0; s < steps; s++) {
+    pass.dispatchWorkgroups(Math.ceil(N / WORKGROUP));
+  }
+  pass.end();
+}
+
+{
+  const enc = device.createCommandEncoder();
+  dispatchCompute(enc, 3000);
+  device.queue.submit([enc.finish()]);
+  await device.queue.onSubmittedWorkDone();
+}
+
+document.getElementById("np").textContent = N.toLocaleString("en-US");
+msgEl.style.display = "none";
+
+// ---------------------------------------------------------------- 主循环
+let elapsed = 0, frames = 0, fpsLast = performance.now();
+let lastMs = performance.now(), acc = 0;
+const SIM_MS = 1000 / 60;
+
+function frame(now) {
+  const dtMs = Math.min(now - lastMs, 100);
+  lastMs = now;
+
+  if (autoSpin && !dragging) rotY += SPIN * dtMs / 1000;
+
+  acc += dtMs;
+  let steps = 0;
+  while (acc >= SIM_MS && steps < 4) { acc -= SIM_MS; steps++; }
+
+  const aspect = W / H;
+  let view = mul(trans(0, 0, -dist), rotXm(rotX));
+  view = mul(view, rotYm(rotY));
+  view = mul(view, scaleM(0.045));
+  view = mul(view, trans(0, 0, -24));
+  const mvp = mul(persp(0.9, aspect, 0.1, 60.0), view);
+
+  uniData.set(mvp, 0);
+  uniData[16] = Math.min(H * 0.0030, 6.0);   // sizePx
+  uniData[17] = 0;
+  uniData[18] = W;                            // res.x
+  uniData[19] = H;                            // res.y
+  device.queue.writeBuffer(uniBuf, 0, uniData);
+
+  const enc = device.createCommandEncoder();
+  if (steps > 0) dispatchCompute(enc, steps);
+
+  const pass = enc.beginRenderPass({
+    colorAttachments: [{
+      view: ctx.getCurrentTexture().createView(),
+      clearValue: { r: 0.008, g: 0.016, b: 0.039, a: 1 },
+      loadOp: "clear",
+      storeOp: "store"
+    }]
+  });
+  pass.setPipeline(renderPipeline);
+  pass.setBindGroup(0, renderBindGroup);
+  pass.draw(6, N);
+  pass.end();
+
+  device.queue.submit([enc.finish()]);
+
+  elapsed += DT * steps;
+  document.getElementById("st").textContent = elapsed.toFixed(1);
+
+  frames++;
+  if (now - fpsLast > 500) {
+    document.getElementById("fps").textContent =
+      (frames * 1000 / (now - fpsLast)).toFixed(0) + " fps";
+    frames = 0; fpsLast = now;
+  }
+
+  requestAnimationFrame(frame);
+}
+
+document.getElementById("bSpin").addEventListener("click", function () {
+  autoSpin = !autoSpin;
+  this.classList.toggle("on", autoSpin);
+});
+
+document.getElementById("bReset").addEventListener("click", () => {
+  seedParticles();
+  device.queue.writeBuffer(particleBuf, 0, data);
+  elapsed = 0;
+});
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

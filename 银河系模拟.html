@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>银河系盘面模拟 · 密度波模型</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#010206; color:#cfe9ff;
+               font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  canvas { display:block; cursor:grab; }
+  canvas:active { cursor:grabbing; }
+  #ui { position:fixed; top:16px; left:18px; background:rgba(6,12,24,.78);
+        border:1px solid rgba(120,170,255,.20); border-radius:10px; padding:12px 15px;
+        font-size:13px; line-height:1.85; backdrop-filter:blur(6px); min-width:255px; }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; color:#9fc4ff; }
+  .row { display:flex; justify-content:space-between; gap:14px; }
+  .k { color:#5d7593; } .v { font-variant-numeric:tabular-nums; color:#dbe9ff; }
+  #btns { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  button { background:rgba(90,140,230,.12); border:1px solid rgba(120,170,255,.35);
+           color:#a9c8ff; border-radius:6px; padding:5px 11px; font-size:12px; cursor:pointer; }
+  button:hover { background:rgba(120,170,255,.22); }
+  button.on { background:rgba(150,190,255,.28); color:#eef5ff; }
+  #hint { position:fixed; bottom:14px; left:18px; font-size:12px; color:#36495f; }
+  #loading { position:fixed; inset:0; display:grid; place-items:center;
+             background:#010206; font-size:15px; color:#9fc4ff; letter-spacing:.08em; z-index:9; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>银河系盘面模拟</h1>
+  <div class="row"><span class="k">恒星数</span><span class="v" id="np">—</span></div>
+  <div class="row"><span class="k">旋转曲线</span><span class="v">平坦 v ≈ 常数</span></div>
+  <div class="row"><span class="k">结构</span><span class="v">2 臂密度波</span></div>
+  <div class="row"><span class="k">帧率</span><span class="v" id="fps">—</span></div>
+  <div class="row"><span class="k">演化</span><span class="v" id="st">0</span></div>
+  <div id="btns">
+    <button id="bArm" class="on">显示旋臂增强</button>
+    <button id="bTilt">俯视</button>
+  </div>
+</div>
+<div id="hint">拖动改变视角 · 滚轮缩放</div>
+<div id="loading">正在生成星系…</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("c");
+  var gl = canvas.getContext("webgl2", {
+    antialias: false, alpha: false, depth: false,
+    powerPreference: "high-performance"
+  });
+  if (!gl) {
+    document.getElementById("loading").textContent =
+      "需要 WebGL2，请用 Chrome / Edge 打开。";
+    return;
+  }
+
+  // ---- 模型参数 ----------------------------------------------------------
+  var N = 60000;          // 恒星总数
+  var V0 = 1.0;           // 平坦旋转曲线速度
+  var RC = 2.0;           // 核心尺度
+  var R_MAX = 20.0;
+  var DT = 0.045;
+
+  var PITCH = 0.32;       // 旋臂缠绕（越小越紧）
+  var OMEGA_P = 0.016;    // 旋臂图案转速（远慢于恒星）
+  var ARM_AMP = 0.030;    // 旋臂扰动强度（相对引力加速度的几个百分点）
+  var R0 = 9.0;           // 旋臂起始半径
+  var ARM_W = 6.0;        // 旋臂径向宽度
+
+  // ---- 数据 --------------------------------------------------------------
+  var pos = new Float32Array(N * 4);   // x, y, z, 类型(0=盘,1=核球)
+  var vel = new Float32Array(N * 2);   // vx, vy
+
+  function gauss() {
+    var u = 1 - Math.random(), v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  function initGalaxy() {
+    for (var i = 0; i < N; i++) {
+      var o = i * 4;
+      var isBulge = Math.random() < 0.12;
+      var R, ang;
+
+      if (isBulge) {
+        // 核球：高度集中
+        R = Math.abs(gauss()) * 1.05 + 0.05;
+        ang = Math.random() * Math.PI * 2;
+        pos[o]     = Math.cos(ang) * R;
+        pos[o + 1] = Math.sin(ang) * R;
+        pos[o + 2] = gauss() * 0.55 * Math.exp(-R * 0.5);
+        pos[o + 3] = 1.0;
+      } else {
+        // 盘：指数分布
+        var u;
+        do { u = Math.random(); } while (u <= 0);
+        R = -2.9 * Math.log(u);
+        if (R > R_MAX) R = R_MAX * Math.random();
+
+        // 螺旋偏置：让初始分布就沿两条对数螺旋聚集
+        var tries = 0;
+        do {
+          ang = Math.random() * Math.PI * 2;
+          var ph = 2 * (ang - Math.log(Math.max(R, 3.2) / R0) / PITCH);
+          var wgt = 1.0 + 0.85 * Math.cos(ph);
+          if (Math.random() * 1.85 < wgt) break;
+        } while (++tries < 30);
+        pos[o]     = Math.cos(ang) * R;
+        pos[o + 1] = Math.sin(ang) * R;
+        pos[o + 2] = gauss() * 0.22;
+        pos[o + 3] = 0.0;
+      }
+
+      // 圆轨道速度：v_c(R) = V0 * R / sqrt(R² + RC²)
+      var vc = V0 * R / Math.sqrt(R * R + RC * RC);
+      vel[i * 2]     = -Math.sin(ang) * vc;
+      vel[i * 2 + 1] =  Math.cos(ang) * vc;
+    }
+  }
+
+  // ---- 物理：引力 + 螺旋密度波 -------------------------------------------
+  var omegaT = 0;
+  var armOn = true;
+
+  function integrate(steps, dtOverride) {
+    var dt = dtOverride || DT;
+    for (var s = 0; s < steps; s++) {
+      omegaT += dt;
+      var phaseShift = 2 * OMEGA_P * omegaT;
+
+      for (var i = 0; i < N; i++) {
+        var o = i * 4;
+        var x = pos[o], y = pos[o + 1];
+        var R2 = x * x + y * y;
+        var R = Math.sqrt(R2) + 1e-6;
+
+        // 轴对称引力（对数势 → 平坦旋转曲线）
+        var aMag = V0 * V0 * R / (R2 + RC * RC);
+        var ax = -aMag * x / R;
+        var ay = -aMag * y / R;
+
+        // 螺旋密度波扰动（只在盘的中外部起作用）
+        if (R > 3.0 && R < R_MAX) {
+          var phi = Math.atan2(y, x);
+          var spiral = 2 * (phi - Math.log(R / R0) / PITCH) - phaseShift;
+          var dr = (R - R0) / ARM_W;
+          var win = 1.0 / (1.0 + dr * dr * dr * dr);      // 平滑的径向窗口
+          var at = (armOn ? ARM_AMP : 0.0) * Math.sin(spiral) * win;
+          ax += -Math.sin(phi) * at;
+          ay +=  Math.cos(phi) * at;
+        }
+
+        var vx = vel[i * 2] + ax * dt;
+        var vy = vel[i * 2 + 1] + ay * dt;
+
+        var nx = x + vx * dt;
+        var ny = y + vy * dt;
+
+        var nR = Math.sqrt(nx * nx + ny * ny);
+        if (nR > R_MAX * 1.6) {
+          nx *= R_MAX * 1.6 / nR;
+          ny *= R_MAX * 1.6 / nR;
+          vx *= 0.6; vy *= 0.6;
+        }
+
+        pos[o] = nx; pos[o + 1] = ny;
+        vel[i * 2] = vx; vel[i * 2 + 1] = vy;
+      }
+    }
+  }
+
+  // ---- 着色器 ------------------------------------------------------------
+  var VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec4 a_pos;
+
+uniform float u_aspect;    // H / W
+uniform float u_scale;     // 世界单位 → NDC
+uniform float u_tilt;      // 0 = 俯视, 1.45 = 侧视
+uniform float u_yaw;
+uniform float u_pt;        // 点大小（设备像素）
+
+out vec3 v_col;
+
+void main() {
+  // 绕 z 轴旋转
+  float ct = cos(u_yaw), st = sin(u_yaw);
+  vec2 r = vec2(a_pos.x * ct - a_pos.y * st,
+                a_pos.x * st + a_pos.y * ct);
+
+  // 倾斜投影（正交）
+  float tiltC = cos(u_tilt), tiltS = sin(u_tilt);
+  vec2 screen = vec2(r.x, r.y * tiltC + a_pos.z * tiltS);
+
+  gl_Position = vec4(screen.x * u_aspect * u_scale,
+                     screen.y * u_scale,
+                     0.0, 1.0);
+  gl_PointSize = (a_pos.w > 0.5 ? u_pt * 1.4 : u_pt);
+
+  float R = length(a_pos.xy);
+  float t = clamp(R / 18.0, 0.0, 1.0);
+
+  // 中心：暖黄白；外围：冷蓝
+  vec3 cCore = vec3(1.00, 0.86, 0.62);
+  vec3 cMid  = vec3(0.86, 0.92, 1.00);
+  vec3 cEdge = vec3(0.42, 0.60, 1.00);
+
+  vec3 col = mix(cCore, cMid, smoothstep(0.0, 0.32, t));
+  col = mix(col, cEdge, smoothstep(0.32, 1.0, t));
+
+  // 核球提亮
+  if (a_pos.w > 0.5) col = mix(col, vec3(1.0, 0.92, 0.75), 0.55);
+
+  v_col = col;
+}`;
+
+  var FS = `#version 300 es
+precision highp float;
+in vec3 v_col;
+out vec4 fragColor;
+
+void main() {
+  vec2 d = gl_PointCoord - vec2(0.5);
+  float r = length(d);
+  float a = 1.0 - smoothstep(0.0, 0.5, r);
+  a = a * a;
+  fragColor = vec4(v_col, a * 0.22);
+}`;
+
+  function compile(vsSrc, fsSrc) {
+    function sh(t, s) {
+      var o = gl.createShader(t);
+      gl.shaderSource(o, s); gl.compileShader(o);
+      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+      return o;
+    }
+    var p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  }
+
+  var prog;
+  try { prog = compile(VS, FS); }
+  catch (e) {
+    document.getElementById("loading").textContent = "着色器错误：" + e.message;
+    return;
+  }
+
+  var vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+
+  var vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  var uAspect = gl.getUniformLocation(prog, "u_aspect");
+  var uScale  = gl.getUniformLocation(prog, "u_scale");
+  var uTilt   = gl.getUniformLocation(prog, "u_tilt");
+  var uYaw    = gl.getUniformLocation(prog, "u_yaw");
+  var uPt     = gl.getUniformLocation(prog, "u_pt");
+
+  // ---- 视角 --------------------------------------------------------------
+  var zoom = 1.0, tilt = 0.95, camYaw = 0.0;
+  var dragging = false, lastX = 0, lastY = 0;
+
+  canvas.addEventListener("mousedown", function (e) {
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+  });
+  window.addEventListener("mouseup", function () { dragging = false; });
+  window.addEventListener("mousemove", function (e) {
+    if (!dragging) return;
+    camYaw += (e.clientX - lastX) * 0.006;
+    tilt -= (e.clientY - lastY) * 0.006;
+    tilt = Math.max(0.0, Math.min(1.45, tilt));
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  canvas.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    zoom *= (1 - Math.sign(e.deltaY) * 0.09);
+    zoom = Math.max(0.25, Math.min(4.0, zoom));
+  }, { passive: false });
+
+  var W = 0, H = 0;
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.floor(window.innerWidth * dpr);
+    H = Math.floor(window.innerHeight * dpr);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    gl.viewport(0, 0, W, H);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---- 初始化 ------------------------------------------------------------
+  initGalaxy();
+  integrate(260, 0.08);    // 轻度预热，保留初始螺旋结构
+
+  document.getElementById("np").textContent = N.toLocaleString("en-US");
+  document.getElementById("loading").style.display = "none";
+
+  // ---- 主循环 ------------------------------------------------------------
+  var frames = 0, fpsLast = performance.now();
+  var lastMs = performance.now(), acc = 0;
+  var SIM_MS = 1000 / 60;
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+
+    var dtMs = Math.min(now - lastMs, 100);
+    lastMs = now;
+
+    acc += dtMs;
+    var steps = 0;
+    while (acc >= SIM_MS && steps < 4) { acc -= SIM_MS; steps++; }
+    if (steps > 0) integrate(steps);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos);
+
+    gl.clearColor(0.004, 0.008, 0.024, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+
+    gl.useProgram(prog);
+    var dpr = H / window.innerHeight;
+    gl.uniform1f(uAspect, H / W);
+    gl.uniform1f(uScale, zoom * 0.92 / 16.0);
+    gl.uniform1f(uTilt, tilt);
+    gl.uniform1f(uYaw, camYaw);
+    gl.uniform1f(uPt, 1.7 * dpr);
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.POINTS, 0, N);
+    gl.bindVertexArray(null);
+
+    document.getElementById("st").textContent = (omegaT).toFixed(0);
+
+    frames++;
+    if (now - fpsLast > 500) {
+      document.getElementById("fps").textContent =
+        (frames * 1000 / (now - fpsLast)).toFixed(0) + " fps";
+      frames = 0; fpsLast = now;
+    }
+  }
+
+  document.getElementById("bTilt").addEventListener("click", function () {
+    tilt = (tilt > 0.5) ? 0.05 : 0.95;
+  });
+
+  document.getElementById("bArm").addEventListener("click", function () {
+    armOn = !armOn;
+    this.classList.toggle("on", armOn);
+    this.textContent = armOn ? "显示旋臂增强" : "已关闭旋臂扰动";
+  });
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

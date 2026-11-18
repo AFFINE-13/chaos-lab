@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>双摆混沌演示</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #06080f; color: #cfe9ff;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  canvas { display: block; }
+
+  #ui {
+    position: fixed; top: 18px; left: 18px;
+    background: rgba(10, 18, 32, .82);
+    border: 1px solid rgba(0, 190, 255, .25);
+    border-radius: 10px; padding: 14px 16px;
+    font-size: 13px; line-height: 1.9;
+    backdrop-filter: blur(6px);
+    min-width: 260px;
+  }
+  #ui h1 {
+    margin: 0 0 8px; font-size: 14px; font-weight: 600;
+    color: #7fe3ff; letter-spacing: .05em;
+  }
+  .row { display: flex; justify-content: space-between; gap: 14px; }
+  .k { color: #6b8ba8; }
+  .v { font-variant-numeric: tabular-nums; color: #d7f2ff; }
+
+  #btns { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    background: rgba(0, 160, 230, .12);
+    border: 1px solid rgba(0, 190, 255, .35);
+    color: #9fe4ff; border-radius: 6px;
+    padding: 5px 12px; font-size: 12px; cursor: pointer;
+    transition: .15s;
+  }
+  button:hover { background: rgba(0, 190, 255, .22); }
+  button.on { background: rgba(0, 220, 255, .28); color: #eaffff; }
+
+  #hint {
+    position: fixed; bottom: 16px; left: 18px;
+    font-size: 12px; color: #4d6f8a;
+  }
+  #flash {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    font-size: 26px; font-weight: 700; letter-spacing: .2em;
+    color: #ff5c8a; opacity: 0; pointer-events: none;
+    text-shadow: 0 0 30px rgba(255, 60, 120, .8);
+    transition: opacity .35s;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <h1>双摆混沌演示</h1>
+  <div class="row"><span class="k">时间</span><span class="v" id="t">0.0 s</span></div>
+  <div class="row"><span class="k">初始角度差</span><span class="v" id="d0">0.001 rad</span></div>
+  <div class="row"><span class="k">当前角度差</span><span class="v" id="d1">0.001 rad</span></div>
+  <div class="row"><span class="k">放大倍数</span><span class="v" id="mul">1×</span></div>
+  <div id="btns">
+    <button id="bPause">暂停</button>
+    <button id="bReset">重置</button>
+    <button id="bMore">加大差异 ×10</button>
+  </div>
+</div>
+
+<div id="flash">已分离</div>
+<div id="hint">蓝 / 品红 = 两个初始条件只差 0.001 弧度的双摆</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("c");
+  var ctx = canvas.getContext("2d");
+
+  var W = 0, H = 0, DPR = 1;
+
+  // ---- 物理参数 -----------------------------------------------------------
+  var G = 9.81;
+  var M1 = 1, M2 = 1, L1 = 1, L2 = 1;
+
+  var DT = 0.0004;          // 积分步长
+  var SUBSTEPS = 12;        // 每帧最大子步数
+
+  var BASE_DIFF = 0.001;    // 初始角度差
+
+  // 状态: [theta1, omega1, theta2, omega2]
+  var A = [0, 0, 0, 0];
+  var B = [0, 0, 0, 0];
+  var diff = BASE_DIFF;
+  var elapsed = 0;
+  var paused = false;
+  var separated = false;
+
+  var trailA = [];
+  var trailB = [];
+  var MAX_TRAIL = 900;
+
+  var divHistory = [];      // 记录角度差随时间的变化
+  var MAX_DIV = 420;
+
+  // 单位换算:米 -> 像素
+  var SCALE = 1;
+  var PIVOT = { x: 0, y: 0 };
+  var pivotA = { x: 0, y: 0 };
+  var pivotB = { x: 0, y: 0 };
+
+  // ---- 物理:双摆方程 ------------------------------------------------------
+  function deriv(s) {
+    var th1 = s[0], w1 = s[1], th2 = s[2], w2 = s[3];
+    var d = th1 - th2;
+    var den = 2 * M1 + M2 - M2 * Math.cos(2 * d);
+
+    var a1 = (-G * (2 * M1 + M2) * Math.sin(th1)
+              - M2 * G * Math.sin(th1 - 2 * th2)
+              - 2 * Math.sin(d) * M2 * (w2 * w2 * L2 + w1 * w1 * L1 * Math.cos(d)))
+             / (L1 * den);
+
+    var a2 = (2 * Math.sin(d) * (w1 * w1 * L1 * (M1 + M2)
+              + G * (M1 + M2) * Math.cos(th1)
+              + w2 * w2 * L2 * M2 * Math.cos(d)))
+             / (L2 * den);
+
+    return [w1, a1, w2, a2];
+  }
+
+  function addScaled(s, k, d) {
+    return [s[0] + k * d[0], s[1] + k * d[1], s[2] + k * d[2], s[3] + k * d[3]];
+  }
+
+  function rk4(s, dt) {
+    var k1 = deriv(s);
+    var k2 = deriv(addScaled(s, dt / 2, k1));
+    var k3 = deriv(addScaled(s, dt / 2, k2));
+    var k4 = deriv(addScaled(s, dt, k3));
+    return [
+      s[0] + dt / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]),
+      s[1] + dt / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]),
+      s[2] + dt / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]),
+      s[3] + dt / 6 * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3])
+    ];
+  }
+
+  // ---- 几何:算两个质点的位置 ---------------------------------------------
+  function positions(s) {
+    var th1 = s[0], th2 = s[2];
+    var x1 = L1 * Math.sin(th1);
+    var y1 = L1 * Math.cos(th1);
+    var x2 = x1 + L2 * Math.sin(th2);
+    var y2 = y1 + L2 * Math.cos(th2);
+    return [x1, y1, x2, y2];
+  }
+
+  // ---- 重置 ---------------------------------------------------------------
+  function reset() {
+    A = [Math.PI * 0.75, 0, Math.PI * 0.55, 0];
+    B = [Math.PI * 0.75 + diff, 0, Math.PI * 0.55, 0];
+    elapsed = 0;
+    separated = false;
+    trailA = [];
+    trailB = [];
+    divHistory = [];
+    document.getElementById("flash").style.opacity = 0;
+    document.getElementById("d0").textContent = diff.toFixed(4) + " rad";
+    updateUI();
+  }
+
+  // ---- 尺寸 ---------------------------------------------------------------
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+    SCALE = Math.min(H * 0.30 / (L1 + L2), W * 0.20 / (L1 + L2));
+    pivotA = { x: W * 0.33, y: H * 0.16 };
+    pivotB = { x: W * 0.72, y: H * 0.16 };
+    reset();
+  }
+
+  // ---- UI ----------------------------------------------------------------
+  function updateUI() {
+    document.getElementById("t").textContent = elapsed.toFixed(1) + " s";
+    var d = Math.abs(A[0] - B[0]) + Math.abs(A[2] - B[2]);
+    document.getElementById("d1").textContent = d.toFixed(6) + " rad";
+    var mul = d / diff;
+    document.getElementById("mul").textContent =
+      mul >= 1000 ? mul.toExponential(1) + "×" : mul.toFixed(1) + "×";
+  }
+
+  // ---- 主循环 -------------------------------------------------------------
+  var lastTime = 0;
+
+  function step() {
+    var steps = 0;
+    while (steps < SUBSTEPS) {
+      A = rk4(A, DT);
+      B = rk4(B, DT);
+      elapsed += DT;
+      steps++;
+      if (steps % 3 === 0) {
+        var pa = positions(A);
+        var pb = positions(B);
+        trailA.push([pa[2], pa[3]]);
+        trailB.push([pb[2], pb[3]]);
+      }
+    }
+    if (trailA.length > MAX_TRAIL) { trailA.splice(0, trailA.length - MAX_TRAIL); }
+    if (trailB.length > MAX_TRAIL) { trailB.splice(0, trailB.length - MAX_TRAIL); }
+
+    var d = Math.abs(A[0] - B[0]) + Math.abs(A[2] - B[2]);
+    divHistory.push(d);
+    if (divHistory.length > MAX_DIV) divHistory.shift();
+
+    if (!separated && d > 0.5) {
+      separated = true;
+      var f = document.getElementById("flash");
+      f.style.opacity = 1;
+      setTimeout(function () { f.style.opacity = 0; }, 1200);
+    }
+  }
+
+  function drawPendulum(pivot, s, color, trail, width) {
+    var p = positions(s);
+    var x1 = pivot.x + p[0] * SCALE, y1 = pivot.y + p[1] * SCALE;
+    var x2 = pivot.x + p[2] * SCALE, y2 = pivot.y + p[3] * SCALE;
+
+    // 轨迹
+    if (trail.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(pivot.x + trail[0][0] * SCALE, pivot.y + trail[0][1] * SCALE);
+      for (var i = 1; i < trail.length; i++) {
+        ctx.lineTo(pivot.x + trail[i][0] * SCALE, pivot.y + trail[i][1] * SCALE);
+      }
+      ctx.strokeStyle = color.replace("ALPHA", "0.16");
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+
+    // 杆
+    ctx.beginPath();
+    ctx.moveTo(pivot.x, pivot.y);
+    ctx.lineTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.strokeStyle = color.replace("ALPHA", "0.85");
+    ctx.lineWidth = width;
+    ctx.stroke();
+
+    // 支点
+    ctx.beginPath();
+    ctx.arc(pivot.x, pivot.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#2a3a4a";
+    ctx.fill();
+
+    // 两个摆锤
+    ctx.beginPath();
+    ctx.arc(x1, y1, 7, 0, Math.PI * 2);
+    ctx.fillStyle = color.replace("ALPHA", "0.9");
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x2, y2, 11, 0, Math.PI * 2);
+    ctx.fillStyle = color.replace("ALPHA", "0.95");
+    ctx.fill();
+
+    // 摆锤发光
+    var g = ctx.createRadialGradient(x2, y2, 0, x2, y2, 40);
+    g.addColorStop(0, color.replace("ALPHA", "0.35"));
+    g.addColorStop(1, color.replace("ALPHA", "0"));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x2, y2, 40, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawDivergence() {
+    if (divHistory.length < 2) return;
+
+    var pad = 18, w = W - pad * 2;
+    var baseY = H - 30, topY = H - 150;
+
+    // 背景框
+    ctx.fillStyle = "rgba(10,18,32,.55)";
+    ctx.fillRect(pad, topY - 12, w, 150 - 12);
+
+    ctx.strokeStyle = "rgba(0,190,255,.18)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(pad, topY - 12, w, 150 - 12);
+
+    // 曲线（对数坐标）
+    var minLog = -4, maxLog = 2;
+    ctx.beginPath();
+    for (var i = 0; i < divHistory.length; i++) {
+      var v = Math.max(divHistory[i], 1e-9);
+      var lg = Math.log10(v);
+      var t = (lg - minLog) / (maxLog - minLog);
+      t = Math.max(0, Math.min(1, t));
+      var x = pad + (i / (MAX_DIV - 1)) * w;
+      var y = baseY - t * (baseY - topY);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = "rgba(255,92,138,.9)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // 标签
+    ctx.fillStyle = "rgba(120,170,200,.75)";
+    ctx.font = "11px Consolas, monospace";
+    ctx.fillText("角度差（对数坐标）", pad + 8, topY + 4);
+    ctx.fillText("1e-4", pad + 8, baseY - 2);
+    ctx.fillText("1e2", pad + 8, topY + 18);
+  }
+
+  function frame(t) {
+    requestAnimationFrame(frame);
+
+    if (!paused && t - lastTime > 4) {
+      step();
+      lastTime = t;
+    }
+
+    // 背景
+    ctx.fillStyle = "#06080f";
+    ctx.fillRect(0, 0, W, H);
+
+    // 网格
+    ctx.strokeStyle = "rgba(40,70,100,.12)";
+    ctx.lineWidth = 1;
+    for (var x = 0; x < W; x += 60) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (var y = 0; y < H; y += 60) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    drawPendulum(pivotA, A, "rgba(0,212,255,ALPHA)", trailA, 2.2);
+    drawPendulum(pivotB, B, "rgba(255,60,140,ALPHA)", trailB, 2.2);
+
+    // 标签
+    ctx.fillStyle = "rgba(0,212,255,.55)";
+    ctx.font = "13px 'Microsoft YaHei', sans-serif";
+    ctx.fillText("双摆 A", pivotA.x - 22, pivotA.y - 22);
+    ctx.fillStyle = "rgba(255,60,140,.55)";
+    ctx.fillText("双摆 B（初始差 " + diff.toFixed(4) + " rad）", pivotB.x - 90, pivotB.y - 22);
+
+    drawDivergence();
+    updateUI();
+  }
+
+  // ---- 交互 --------------------------------------------------------------
+  document.getElementById("bPause").addEventListener("click", function () {
+    paused = !paused;
+    this.textContent = paused ? "继续" : "暂停";
+    this.classList.toggle("on", paused);
+  });
+
+  document.getElementById("bReset").addEventListener("click", reset);
+
+  document.getElementById("bMore").addEventListener("click", function () {
+    diff *= 10;
+    if (diff > 0.5) diff = 0.001;
+    reset();
+  });
+
+  window.addEventListener("resize", resize);
+
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

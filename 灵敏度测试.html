@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>甩枪灵敏度标定 · Sensitivity Calibrator</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin:0; height:100%; overflow:hidden; background:#05070c;
+    color:#dbe9ff; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    user-select:none;
+  }
+  canvas#gl { display:block; position:fixed; inset:0; }
+
+  /* ---------- 准星 ---------- */
+  #cross {
+    position:fixed; left:50%; top:50%; width:2px; height:2px;
+    margin:-1px 0 0 -1px; background:#7cf9c8;
+    box-shadow:0 0 6px rgba(124,249,200,.9);
+    pointer-events:none; opacity:0; transition:opacity .2s;
+  }
+  #cross.on { opacity:1; }
+
+  /* ---------- 顶部 HUD ---------- */
+  #hud {
+    position:fixed; top:0; left:0; right:0; padding:14px 20px;
+    display:flex; justify-content:space-between; align-items:center;
+    font-size:13px; color:#8fa9c7; pointer-events:none;
+    background:linear-gradient(180deg, rgba(3,6,12,.9), transparent);
+  }
+  #hud .left, #hud .right { display:flex; gap:24px; }
+  #hud b { color:#e9f3ff; font-variant-numeric:tabular-nums; font-size:16px; }
+  #hud .warn { color:#ffb454; }
+
+  /* ---------- 通用面板 ---------- */
+  .screen {
+    position:fixed; inset:0; display:grid; place-items:center;
+    background:rgba(3,6,12,.93); backdrop-filter:blur(10px);
+    z-index:10; padding:24px; overflow:auto;
+  }
+  .screen.hidden { display:none; }
+  .card {
+    width:min(760px, 100%);
+    background:rgba(10,16,28,.92);
+    border:1px solid rgba(90,140,200,.22);
+    border-radius:14px; padding:26px 30px 24px;
+  }
+  h1 { margin:0 0 4px; font-size:20px; font-weight:650; color:#eaf4ff; }
+  .lead { margin:0 0 20px; font-size:13px; color:#6d87a3; line-height:1.7; }
+
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px 20px; }
+  .field { display:flex; flex-direction:column; gap:6px; }
+  .field label { font-size:12px; color:#7b93ae; letter-spacing:.03em; }
+  .field input, .field select {
+    background:#0b1220; border:1px solid rgba(90,140,200,.28);
+    color:#e6f0ff; border-radius:8px; padding:9px 12px;
+    font-size:15px; font-family:inherit; outline:none;
+  }
+  .field input:focus, .field select:focus { border-color:#3d8fd8; }
+  .derived {
+    margin:16px 0 20px; padding:12px 16px;
+    background:rgba(40,80,140,.14); border-radius:10px;
+    display:flex; gap:28px; font-size:13px; color:#8fa9c7;
+  }
+  .derived b { color:#9fd8ff; font-size:15px; }
+
+  button.primary {
+    width:100%; padding:13px; font-size:15px; font-weight:600;
+    background:linear-gradient(180deg,#2f7fd4,#215fa8);
+    border:none; border-radius:10px; color:#fff; cursor:pointer;
+    font-family:inherit; letter-spacing:.04em;
+  }
+  button.primary:hover { filter:brightness(1.12); }
+  button.primary:disabled { opacity:.45; cursor:not-allowed; }
+
+  /* ---------- 报告 ---------- */
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin:16px 0 18px; }
+  .stat {
+    background:rgba(20,32,52,.7); border-radius:10px; padding:12px 14px;
+  }
+  .stat .k { font-size:11px; color:#657f9c; letter-spacing:.04em; }
+  .stat .v { font-size:22px; font-weight:650; color:#e9f3ff; margin-top:3px;
+             font-variant-numeric:tabular-nums; }
+  .stat .v small { font-size:11px; color:#6d87a3; font-weight:400; }
+  .stat.good .v { color:#6ee7a8; }
+  .stat.bad .v { color:#ff8a9c; }
+
+  .verdict {
+    padding:14px 18px; border-radius:10px; margin-bottom:16px;
+    font-size:14px; line-height:1.75;
+  }
+  .verdict.ok { background:rgba(40,160,110,.13); border:1px solid rgba(80,220,160,.3); }
+  .verdict.bad { background:rgba(200,120,40,.13); border:1px solid rgba(255,170,80,.3); }
+
+  #chart { width:100%; height:110px; display:block; margin:6px 0 14px; }
+
+  .actions { display:flex; gap:12px; }
+  .actions button {
+    flex:1; padding:12px; font-size:14px; font-family:inherit;
+    border-radius:9px; cursor:pointer; font-weight:600;
+  }
+  .actions .go { background:linear-gradient(180deg,#2f7fd4,#215fa8); border:none; color:#fff; }
+  .actions .ghost { background:transparent; border:1px solid rgba(90,140,200,.35); color:#9fc8ff; }
+  .actions .go:hover { filter:brightness(1.12); }
+  .actions .ghost:hover { background:rgba(90,140,200,.12); }
+
+  #escHint {
+    position:fixed; bottom:16px; left:0; right:0; text-align:center;
+    font-size:12px; color:rgba(160,190,220,.35); pointer-events:none;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gl"></canvas>
+<div id="cross"></div>
+<div id="escHint" style="display:none">ESC 暂停</div>
+
+<div id="hud" style="display:none">
+  <div class="left">
+    <span>靶 <b id="hCount">0</b>/<span id="hTotal">30</span></span>
+    <span>本轮比 <b id="hRatio">—</b></span>
+  </div>
+  <div class="right">
+    <span>eDPI <b id="hEdpi">—</b></span>
+    <span>cm/360 <b id="hCm">—</b></span>
+    <span id="hMsg"></span>
+  </div>
+</div>
+
+<!-- ================= 设置页 ================= -->
+<div class="screen" id="setup">
+  <div class="card">
+    <h1>甩枪灵敏度标定</h1>
+    <p class="lead">
+      每次甩枪记录「实际甩过的角度 ÷ 应该甩的角度」。大于 1 说明冲过头（灵敏度偏高），
+      小于 1 说明甩不到位（灵敏度偏低）。多轮迭代后自动收敛到你的本命值。
+    </p>
+
+    <div class="grid2">
+      <div class="field">
+        <label>鼠标 DPI</label>
+        <input type="number" id="inDpi" value="800" min="100" max="32000" step="50">
+      </div>
+      <div class="field">
+        <label>当前游戏内灵敏度</label>
+        <input type="number" id="inSens" value="0.35" min="0.01" max="20" step="0.01">
+      </div>
+      <div class="field">
+        <label>游戏 / 视角系数</label>
+        <select id="inGame">
+          <option value="0.07">无畏契约 Valorant（0.07°/count）</option>
+          <option value="0.022">CS2（0.022°/count）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>每轮靶数</label>
+        <select id="inCount">
+          <option>20</option>
+          <option selected>30</option>
+          <option>50</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>靶子大小（角度）</label>
+        <select id="inSize">
+          <option value="0.7">小 0.7°</option>
+          <option value="0.9" selected>中 0.9°</option>
+          <option value="1.2">大 1.2°</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>水平 FOV</label>
+        <input type="number" id="inFov" value="103" min="70" max="120">
+      </div>
+    </div>
+
+    <div class="derived">
+      <span>eDPI <b id="dEdpi">—</b></span>
+      <span>cm/360° <b id="dCm">—</b></span>
+      <span>每 count 转动 <b id="dDeg">—</b></span>
+    </div>
+
+    <button class="primary" id="btnStart">开始测试</button>
+  </div>
+</div>
+
+<!-- ================= 报告页 ================= -->
+<div class="screen hidden" id="report">
+  <div class="card">
+    <h1 id="rTitle">第 1 轮结果</h1>
+    <p class="lead" id="rLead"></p>
+
+    <canvas id="chart"></canvas>
+
+    <div class="stats">
+      <div class="stat"><div class="k">甩枪比</div><div class="v" id="rRatio">—</div></div>
+      <div class="stat"><div class="k">首发命中率</div><div class="v" id="rHit">—</div></div>
+      <div class="stat"><div class="k">点击纪律</div><div class="v" id="rDisc">—</div></div>
+      <div class="stat"><div class="k">Fitts 吞吐</div><div class="v" id="rFitts">—</div></div>
+      <div class="stat"><div class="k">过头率</div><div class="v" id="rOver">—</div></div>
+      <div class="stat"><div class="k">不足率</div><div class="v" id="rUnder">—</div></div>
+      <div class="stat"><div class="k">左 / 右 差</div><div class="v" id="rAsym">—</div></div>
+      <div class="stat"><div class="k">平均用时</div><div class="v" id="rMs">—</div></div>
+    </div>
+
+    <div class="verdict" id="rVerdict"></div>
+
+    <div class="actions">
+      <button class="ghost" id="btnRestart">用原灵敏度重测</button>
+      <button class="go" id="btnNext">用建议灵敏度再测一轮</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // =====================================================================
+  // 常量
+  // =====================================================================
+  var DEG = Math.PI / 180;
+  var EYE = [0, 1.7, 0];
+
+  // =====================================================================
+  // 状态
+  // =====================================================================
+  var cfg = {
+    dpi: 800, sens: 0.35, gameK: 0.07, count: 30, sizeDeg: 0.9, fovH: 103
+  };
+
+  var cam = { yaw: 0, pitch: 0 };
+
+  var phase = "setup";        // setup | aiming | paused
+  var round = 1;
+  var history = [];           // { round, sens, ratio }
+
+  // 本轮
+  var shots = [];             // { ratio, hit, ms, dx, dy, clicks }
+  var trial = null;           // 当前靶
+  var warmupLeft = 3;
+  var sphereCount = 0;
+  var lastSens = cfg.sens;
+
+  // =====================================================================
+  // WebGL
+  // =====================================================================
+  var canvas = document.getElementById("gl");
+  var gl = canvas.getContext("webgl2", { antialias: true, alpha: false });
+
+  if (!gl) {
+    document.getElementById("setup").querySelector(".card").innerHTML =
+      "<h1>需要 WebGL2</h1><p class='lead'>请用 Chrome / Edge 打开本页面。</p>";
+    return;
+  }
+
+  var VS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 a_pos;
+layout(location=1) in vec3 a_nrm;
+uniform mat4 u_vp;
+uniform vec3 u_eye;
+uniform vec3 u_color;
+out vec3 v_nrm;
+out vec3 v_col;
+void main() {
+  gl_Position = u_vp * vec4(a_pos, 1.0);
+  v_nrm = a_nrm;
+  v_col = u_color;
+}`;
+
+  var FS = `#version 300 es
+precision highp float;
+in vec3 v_nrm;
+in vec3 v_col;
+out vec4 frag;
+void main() {
+  vec3 n = normalize(v_nrm);
+  float d = max(dot(n, normalize(vec3(0.4, 0.9, 0.35))), 0.0);
+  float amb = 0.35;
+  vec3 c = v_col * (amb + 0.85 * d);
+  frag = vec4(c, 1.0);
+}`;
+
+  function sh(t, s) {
+    var o = gl.createShader(t);
+    gl.shaderSource(o, s); gl.compileShader(o);
+    if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+    return o;
+  }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(prog));
+  }
+
+  var U = {
+    vp: gl.getUniformLocation(prog, "u_vp"),
+    eye: gl.getUniformLocation(prog, "u_eye"),
+    color: gl.getUniformLocation(prog, "u_color")
+  };
+
+  // ---- 网格地面 -------------------------------------------------------
+  var gridVerts = [];
+  (function () {
+    var N = 22, S = 2.0;
+    for (var i = -N; i <= N; i++) {
+      var p = i * S;
+      gridVerts.push(-N * S, 0, p, 0, 1, 0);
+      gridVerts.push(N * S, 0, p, 0, 1, 0);
+      gridVerts.push(p, 0, -N * S, 0, 1, 0);
+      gridVerts.push(p, 0, N * S, 0, 1, 0);
+    }
+  })();
+  var gridBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(gridVerts), gl.STATIC_DRAW);
+
+  // ---- 立柱（提供空间参照）--------------------------------------------
+  var boxVerts = [];
+  (function () {
+    var c = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+    var f = [[0,1,2,3],[5,4,7,6],[4,0,3,7],[1,5,6,2],[3,2,6,7],[4,5,1,0]];
+    var nrm = [[0,0,-1],[0,0,1],[-1,0,0],[1,0,0],[0,1,0],[0,-1,0]];
+    for (var i = 0; i < f.length; i++) {
+      var q = f[i], n = nrm[i];
+      var tri = [q[0], q[1], q[2], q[0], q[2], q[3]];
+      for (var j = 0; j < 6; j++) {
+        var v = c[tri[j]];
+        boxVerts.push(v[0], v[1], v[2], n[0], n[1], n[2]);
+      }
+    }
+  })();
+  var boxBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, boxBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(boxVerts), gl.STATIC_DRAW);
+
+  // ---- 球体（靶子）----------------------------------------------------
+  var sphereData = null;
+  function buildSphere(segs, rings) {
+    var v = [], idx = [];
+    for (var y = 0; y <= rings; y++) {
+      var v0 = y / rings, phi = v0 * Math.PI;
+      for (var x = 0; x <= segs; x++) {
+        var u0 = x / segs, th = u0 * Math.PI * 2;
+        var nx = Math.sin(phi) * Math.cos(th);
+        var ny = Math.cos(phi);
+        var nz = Math.sin(phi) * Math.sin(th);
+        v.push(nx, ny, nz);
+      }
+    }
+    for (var yy = 0; yy < rings; yy++) {
+      for (var xx = 0; xx < segs; xx++) {
+        var a = yy * (segs + 1) + xx;
+        var b = a + segs + 1;
+        idx.push(a, b, a + 1, a + 1, b, b + 1);
+      }
+    }
+    sphereData = { v: new Float32Array(v), i: new Uint16Array(idx) };
+  }
+  buildSphere(18, 12);
+
+  var sphereVB = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, sphereVB);
+  gl.bufferData(gl.ARRAY_BUFFER, sphereData.v, gl.STATIC_DRAW);
+  var sphereIB = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sphereIB);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, sphereData.i, gl.STATIC_DRAW);
+
+  function bindAttr(buf, loc, size, stride, offset) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride || 0, offset || 0);
+  }
+
+  // =====================================================================
+  // 矩阵
+  // =====================================================================
+  function m4mul(a, b) {
+    var o = new Float32Array(16);
+    for (var c = 0; c < 4; c++)
+      for (var r = 0; r < 4; r++)
+        o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] +
+                       a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+    return o;
+  }
+  function perspective(fovy, aspect, near, far) {
+    var f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    return new Float32Array([
+      f / aspect, 0, 0, 0, 0, f, 0, 0,
+      0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0
+    ]);
+  }
+  function lookAt(eye, dir) {
+    var zx = -dir[0], zy = -dir[1], zz = -dir[2];
+    var zl = Math.hypot(zx, zy, zz) || 1;
+    zx /= zl; zy /= zl; zz /= zl;
+
+    var ux = 0, uy = 1, uz = 0;
+    var xx = uy * zz - uz * zy, xy = uz * zx - ux * zz, xz = ux * zy - uy * zx;
+    var xl = Math.hypot(xx, xy, xz) || 1;
+    xx /= xl; xy /= xl; xz /= xl;
+
+    var yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+
+    return new Float32Array([
+      xx, yx, zx, 0,
+      xy, yy, zy, 0,
+      xz, yz, zz, 0,
+      -(xx * eye[0] + xy * eye[1] + xz * eye[2]),
+      -(yx * eye[0] + yy * eye[1] + yz * eye[2]),
+      -(zx * eye[0] + zy * eye[1] + zz * eye[2]),
+      1
+    ]);
+  }
+  function viewDir(yaw, pitch) {
+    var cp = Math.cos(pitch);
+    return [cp * Math.sin(yaw), Math.sin(pitch), -cp * Math.cos(yaw)];
+  }
+  function angBetween(a, b) {
+    var d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    d = Math.max(-1, Math.min(1, d));
+    return Math.acos(d) / DEG;
+  }
+
+  // =====================================================================
+  // 渲染
+  // =====================================================================
+  var W = 0, H = 0;
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = Math.floor(window.innerWidth * dpr);
+    H = Math.floor(window.innerHeight * dpr);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    gl.viewport(0, 0, W, H);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  function render() {
+    gl.clearColor(0.016, 0.024, 0.043, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+
+    var aspect = W / H;
+    var fovV = 2 * Math.atan(Math.tan(cfg.fovH * DEG / 2) / aspect);
+    var proj = perspective(fovV, aspect, 0.05, 200);
+
+    var dir = viewDir(cam.yaw, cam.pitch);
+    var view = lookAt(EYE, dir);
+    var vp = m4mul(proj, view);
+
+    gl.useProgram(prog);
+    gl.uniformMatrix4fv(U.vp, false, vp);
+    gl.uniform3f(U.eye, EYE[0], EYE[1], EYE[2]);
+
+    // 地面
+    gl.uniform3f(U.color, 0.10, 0.18, 0.30);
+    bindAttr(gridBuf, 0, 3, 24, 0);
+    bindAttr(gridBuf, 1, 3, 24, 12);
+    gl.drawArrays(gl.LINES, 0, gridVerts.length / 6);
+
+    // 立柱
+    var pillars = [[-9, 0, -14], [9, 0, -14], [-16, 0, 2], [16, 0, 2],
+                   [0, 0, -22], [-6, 0, -26], [6, 0, -26]];
+    for (var i = 0; i < pillars.length; i++) {
+      var p = pillars[i];
+      var model = new Float32Array([
+        1.1, 0, 0, 0,
+        0, 5.0, 0, 0,
+        0, 0, 1.1, 0,
+        p[0], 0, p[2], 1
+      ]);
+      gl.uniformMatrix4fv(U.vp, false, m4mul(vp, model));
+      gl.uniform3f(U.color, 0.13, 0.20, 0.31);
+      bindAttr(boxBuf, 0, 3, 24, 0);
+      bindAttr(boxBuf, 1, 3, 24, 12);
+      gl.drawArrays(gl.TRIANGLES, 0, 36);
+    }
+    gl.uniformMatrix4fv(U.vp, false, m4mul(vp, new Float32Array([
+      1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
+    ])));
+
+    // 靶子
+    if (trial) {
+      var rad = trial.radius;
+      var model2 = new Float32Array([
+        rad, 0, 0, 0,
+        0, rad, 0, 0,
+        0, 0, rad, 0,
+        trial.pos[0], trial.pos[1], trial.pos[2], 1
+      ]);
+      gl.uniformMatrix4fv(U.vp, false, m4mul(vp, model2));
+      gl.uniform3f(U.color, 1.0, 0.42, 0.30);
+      bindAttr(sphereVB, 0, 3);
+      bindAttr(sphereVB, 1, 3);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, sphereIB);
+      gl.drawElements(gl.TRIANGLES, sphereData.i.length, gl.UNSIGNED_SHORT, 0);
+    }
+  }
+
+  var rafId = null;
+  function loop() {
+    rafId = requestAnimationFrame(loop);
+    if (phase === "aiming") tick();
+    render();
+  }
+
+  // =====================================================================
+  // 输入（Raw Input via Pointer Lock）
+  // =====================================================================
+  var locked = false;
+  var accYaw = 0, accPitch = 0;     // 本次甩枪累计角度（度）
+  var flickStarted = false;
+  var flickLatched = false;
+  var landed = null;
+  var lastMoveT = 0;
+  var spawnT = 0;
+  var clickCount = 0;
+  var lastClickT = 0;
+
+  function degPerCount() { return cfg.gameK * cfg.sens; }
+
+  function onMove(dx, dy) {
+    if (phase !== "aiming") return;
+    var k = degPerCount();
+    var dYaw = dx * k;
+    var dPitch = -dy * k;
+
+    cam.yaw += dYaw * DEG;
+    cam.pitch += dPitch * DEG;
+    var lim = 88 * DEG;
+    if (cam.pitch > lim) cam.pitch = lim;
+    if (cam.pitch < -lim) cam.pitch = -lim;
+
+    accYaw += dYaw;
+    accPitch += dPitch;
+
+    if (!flickStarted && Math.hypot(accYaw, accPitch) > 1.2) flickStarted = true;
+    lastMoveT = performance.now();
+  }
+
+  // 优先用 pointerrawupdate（高频、原始），不支持则退回 mousemove。
+  // 两者只能挂一个，否则位移会被重复累加。
+  var RAW_SUPPORTED = ("onpointerrawupdate" in document);
+
+  if (RAW_SUPPORTED) {
+    document.addEventListener("pointerrawupdate", function (e) {
+      onMove(e.movementX, e.movementY);
+    });
+  } else {
+    document.addEventListener("mousemove", function (e) {
+      if (!document.pointerLockElement) return;
+      onMove(e.movementX, e.movementY);
+    });
+  }
+
+  // =====================================================================
+  // 测试流程
+  // =====================================================================
+  function newTrial() {
+    // 随机偏角
+    var ay, ap, tries = 0;
+    do {
+      ay = (Math.random() * 2 - 1) * 24;              // ±24°
+      ap = -4 + Math.random() * 17;                   // -4° .. +13°（避免打到地板下）
+      tries++;
+    } while (Math.hypot(ay, ap) < 6 && tries < 40);
+
+    var yawT = cam.yaw + ay * DEG;
+    var pitchT = Math.max(-80 * DEG, Math.min(80 * DEG, cam.pitch + ap * DEG));
+
+    var dist = 12;
+    trial = {
+      ay: ay, ap: ap,
+      yawT: yawT, pitchT: pitchT,
+      dir: viewDir(yawT, pitchT),
+      radius: dist * Math.tan(cfg.sizeDeg * DEG / 2),
+      pos: [EYE[0], EYE[1], EYE[2]]
+    };
+    trial.pos = [
+      EYE[0] + trial.dir[0] * dist,
+      EYE[1] + trial.dir[1] * dist,
+      EYE[2] + trial.dir[2] * dist
+    ];
+
+    accYaw = accPitch = 0;
+    flickStarted = false;
+    flickLatched = false;
+    landed = null;
+    clickCount = 0;
+    spawnT = performance.now();
+    lastMoveT = spawnT;
+  }
+
+  function latchFlick() {
+    if (flickLatched) return;
+    flickLatched = true;
+    landed = { yaw: accYaw, pitch: accPitch };
+  }
+
+  function tick() {
+    if (!trial) return;
+    var now = performance.now();
+
+    // 甩枪停稳判定
+    if (!flickLatched && flickStarted && now - lastMoveT > 95) latchFlick();
+
+    // 超时未点击 → 视为未完成
+    if (now - spawnT > 6000) finishTrial(false, true);
+  }
+
+  function onClick() {
+    if (phase !== "aiming" || !trial) return;
+    var now = performance.now();
+    if (now - lastClickT < 40) return;
+    lastClickT = now;
+    clickCount++;
+
+    if (!flickLatched) latchFlick();
+
+    var cur = viewDir(cam.yaw, cam.pitch);
+    var miss = angBetween(cur, trial.dir);
+    var hit = miss <= cfg.sizeDeg / 2;
+
+    finishTrial(hit, false);
+  }
+
+  function finishTrial(hit, timeout) {
+    var now = performance.now();
+    var ms = now - spawnT;
+
+    if (!timeout && landed) {
+      var denom = trial.ay * trial.ay + trial.ap * trial.ap;
+      var ratio = (landed.yaw * trial.ay + landed.pitch * trial.ap) / denom;
+      if (warmupLeft > 0) {
+        warmupLeft--;
+      } else {
+        shots.push({
+          ratio: ratio,
+          hit: hit,
+          ms: ms,
+          ay: trial.ay,
+          clicks: clickCount,
+          timeout: timeout
+        });
+      }
+    } else if (warmupLeft > 0) {
+      warmupLeft--;
+    } else {
+      shots.push({ ratio: null, hit: false, ms: ms, ay: trial.ay, clicks: clickCount, timeout: true });
+    }
+
+    document.getElementById("hCount").textContent = shots.length;
+    updateHud();
+
+    if (shots.length >= cfg.count) {
+      endRound();
+      return;
+    }
+    newTrial();
+  }
+
+  function updateHud() {
+    var valid = shots.filter(function (s) { return s.ratio !== null && isFinite(s.ratio); });
+    if (!valid.length) return;
+    var mean = valid.reduce(function (a, s) { return a + s.ratio; }, 0) / valid.length;
+    document.getElementById("hRatio").textContent = mean.toFixed(3);
+    document.getElementById("hEdpi").textContent = Math.round(cfg.dpi * cfg.sens);
+    document.getElementById("hCm").textContent = cm360().toFixed(1);
+  }
+
+  function cm360() {
+    return 360 / (cfg.dpi * degPerCount()) * 2.54;
+  }
+
+  // =====================================================================
+  // 本轮结束 → 统计
+  // =====================================================================
+  function endRound() {
+    phase = "report";
+    if (document.pointerLockElement) document.exitPointerLock();
+    document.getElementById("cross").classList.remove("on");
+    document.getElementById("hud").style.display = "none";
+    document.getElementById("escHint").style.display = "none";
+
+    var valid = shots.filter(function (s) { return s.ratio !== null && isFinite(s.ratio) && s.ratio > 0.2 && s.ratio < 4; });
+    var n = valid.length;
+
+    var meanRatio = 1, overRate = 0, underRate = 0, hitRate = 0, disc = 0, fitts = 0, asym = 0;
+    var leftR = [], rightR = [];
+    var msSum = 0;
+
+    if (n > 0) {
+      var sR = 0;
+      for (var i = 0; i < n; i++) {
+        var s = valid[i];
+        sR += s.ratio;
+        msSum += s.ms;
+        if (s.ratio > 1.15) overRate++;
+        if (s.ratio < 0.85) underRate++;
+        if (s.ay > 0) rightR.push(s.ratio); else leftR.push(s.ratio);
+      }
+      meanRatio = sR / n;
+      overRate = overRate / n;
+      underRate = underRate / n;
+
+      var hits = 0, totalClicks = 0;
+      for (var j = 0; j < shots.length; j++) {
+        if (shots[j].hit) hits++;
+        totalClicks += Math.max(1, shots[j].clicks);
+      }
+      hitRate = shots.length ? hits / shots.length : 0;
+      disc = shots.length ? totalClicks / shots.length : 0;
+
+      // Fitts：ID = log2(2D/W)，吞吐 = ID / 平均用时（bits/s）
+      var D = 20;  // 平均角距（度），近似
+      var idBits = Math.log2(2 * D / cfg.sizeDeg);
+      var mtSec = msSum / n / 1000;
+      fitts = idBits / mtSec;
+
+      var ml = leftR.length ? mean(leftR) : 0;
+      var mr = rightR.length ? mean(rightR) : 0;
+      asym = (ml + mr) > 0 ? Math.abs(ml - mr) / ((ml + mr) / 2) : 0;
+    }
+
+    // 阻尼更新：新值 = 旧值 × (1/比值)^0.8
+    // 纯比例更新（指数 1.0）容易在一轮内冲过头，来回震荡
+    var ALPHA = 0.8;
+    var suggested = cfg.sens * Math.pow(1 / meanRatio, ALPHA);
+
+    // 单轮最多变动 ±35%，避免一轮异常把灵敏度带飞
+    suggested = Math.max(cfg.sens * 0.65, Math.min(cfg.sens * 1.35, suggested));
+
+    var converged = Math.abs(meanRatio - 1) < 0.08;
+
+    history.push({ round: round, sens: cfg.sens, ratio: meanRatio, converged: converged });
+
+    // 收敛判定：本轮 + 上一轮都达标
+    var prev = history.length >= 2 ? history[history.length - 2] : null;
+    var bothOk = converged && prev && prev.converged;
+
+    // ---- 填表 ----
+    document.getElementById("rTitle").textContent = "第 " + round + " 轮结果";
+    document.getElementById("rLead").textContent =
+      "本轮 " + shots.length + " 个靶，有效样本 " + n + " 个。当前灵敏度 " +
+      cfg.sens.toFixed(3) + "（eDPI " + Math.round(cfg.dpi * cfg.sens) + "）";
+
+    document.getElementById("rRatio").innerHTML = meanRatio.toFixed(3);
+    document.getElementById("rHit").innerHTML = (hitRate * 100).toFixed(0) + "<small>%</small>";
+    document.getElementById("rDisc").innerHTML = disc.toFixed(2) + "<small>次/靶</small>";
+    document.getElementById("rFitts").innerHTML = fitts.toFixed(2) + "<small>bit/s</small>";
+    document.getElementById("rOver").innerHTML = (overRate * 100).toFixed(0) + "<small>%</small>";
+    document.getElementById("rUnder").innerHTML = (underRate * 100).toFixed(0) + "<small>%</small>";
+    document.getElementById("rAsym").innerHTML = (asym * 100).toFixed(0) + "<small>%</small>";
+    document.getElementById("rMs").innerHTML = (msSum / Math.max(1, n)).toFixed(0) + "<small>ms</small>";
+
+    var v = document.getElementById("rVerdict");
+    if (bothOk) {
+      v.className = "verdict ok";
+      v.innerHTML = "<b>✅ 已收敛</b><br>甩枪比 " + meanRatio.toFixed(3) +
+        "，连续两轮落在 ±8% 内。当前灵敏度 <b>" + cfg.sens.toFixed(3) +
+        "</b>（eDPI " + Math.round(cfg.dpi * cfg.sens) + "，cm/360° " + cm360().toFixed(1) +
+        "）就是你的本命值。";
+      document.getElementById("btnNext").style.display = "none";
+    } else if (meanRatio > 1) {
+      v.className = "verdict bad";
+      v.innerHTML = "<b>灵敏度偏高</b><br>甩枪比 " + meanRatio.toFixed(3) +
+        "，平均冲过头 " + ((meanRatio - 1) * 100).toFixed(0) +
+        "%。建议改为 <b>" + suggested.toFixed(3) + "</b>。";
+      document.getElementById("btnNext").style.display = "";
+    } else {
+      v.className = "verdict bad";
+      v.innerHTML = "<b>灵敏度偏低</b><br>甩枪比 " + meanRatio.toFixed(3) +
+        "，平均只到 " + (meanRatio * 100).toFixed(0) +
+        "%。建议改为 <b>" + suggested.toFixed(3) + "</b>。";
+      document.getElementById("btnNext").style.display = "";
+    }
+
+    lastSens = suggested;
+
+    document.getElementById("report").classList.remove("hidden");
+    // 面板显示后再画，否则 canvas 宽度还是 0
+    requestAnimationFrame(function () { requestAnimationFrame(drawChart); });
+  }
+
+  function mean(a) { return a.reduce(function (x, y) { return x + y; }, 0) / a.length; }
+
+  // ---- 趋势图 ---------------------------------------------------------
+  function drawChart() {
+    var cv = document.getElementById("chart");
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = cv.clientWidth, h = cv.clientHeight;
+    cv.width = w * dpr; cv.height = h * dpr;
+    var g = cv.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+
+    var pad = 26;
+    var lo = 0.7, hi = 1.3;
+    history.forEach(function (p) {
+      lo = Math.min(lo, p.ratio - 0.05);
+      hi = Math.max(hi, p.ratio + 0.05);
+    });
+
+    function yOf(r) { return h - pad - (r - lo) / (hi - lo) * (h - pad * 2); }
+    function xOf(i) { return pad + (history.length <= 1 ? (w - pad * 2) / 2 : i / (history.length - 1) * (w - pad * 2)); }
+
+    // 目标线
+    g.strokeStyle = "rgba(110,231,168,.45)";
+    g.setLineDash([4, 4]);
+    g.beginPath(); g.moveTo(pad, yOf(1)); g.lineTo(w - pad, yOf(1)); g.stroke();
+    g.setLineDash([]);
+
+    // 折线
+    g.strokeStyle = "#4fa8ff"; g.lineWidth = 2;
+    g.beginPath();
+    history.forEach(function (p, i) {
+      var x = xOf(i), y = yOf(p.ratio);
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    });
+    g.stroke();
+
+    // 点
+    history.forEach(function (p, i) {
+      var x = xOf(i), y = yOf(p.ratio);
+      g.beginPath(); g.arc(x, y, 4, 0, Math.PI * 2);
+      g.fillStyle = p.converged ? "#6ee7a8" : "#4fa8ff";
+      g.fill();
+      g.fillStyle = "rgba(180,210,240,.7)";
+      g.font = "11px monospace";
+      g.fillText(p.ratio.toFixed(2), x - 9, y - 10);
+    });
+
+    g.fillStyle = "rgba(120,150,180,.6)";
+    g.font = "11px monospace";
+    g.fillText("甩枪比", 4, 12);
+    g.fillText("1.00", 4, yOf(1) + 4);
+  }
+
+  // =====================================================================
+  // 启动 / 暂停
+  // =====================================================================
+  function startRound(sens) {
+    cfg.sens = sens;
+    shots = [];
+    warmupLeft = 3;
+    cam.yaw = 0; cam.pitch = 0;
+    round = history.length + 1;
+
+    document.getElementById("hTotal").textContent = cfg.count;
+    document.getElementById("hCount").textContent = 0;
+    document.getElementById("hRatio").textContent = "—";
+    document.getElementById("hEdpi").textContent = Math.round(cfg.dpi * cfg.sens);
+    document.getElementById("hCm").textContent = cm360().toFixed(1);
+    document.getElementById("hMsg").textContent = "";
+
+    document.getElementById("setup").classList.add("hidden");
+    document.getElementById("report").classList.add("hidden");
+    document.getElementById("hud").style.display = "";
+    document.getElementById("cross").classList.add("on");
+    document.getElementById("escHint").style.display = "";
+
+    phase = "aiming";
+    newTrial();
+
+    requestLock();
+  }
+
+  function requestLock() {
+    var p;
+    try {
+      p = canvas.requestPointerLock({ unadjustedMovement: true });
+    } catch (e) {
+      canvas.requestPointerLock();
+      return;
+    }
+    if (p && p.catch) {
+      p.catch(function () {
+        // 不支持 unadjustedMovement 就退回普通锁定
+        canvas.requestPointerLock();
+      });
+    }
+  }
+
+  document.addEventListener("pointerlockchange", function () {
+    locked = document.pointerLockElement === canvas;
+    if (!locked && phase === "aiming") {
+      phase = "paused";
+      document.getElementById("hMsg").innerHTML = "<span class='warn'>已暂停 · 点击继续</span>";
+    } else if (locked && phase === "paused") {
+      phase = "aiming";
+      document.getElementById("hMsg").textContent = "";
+      document.getElementById("escHint").style.display = "";
+    }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && phase === "aiming") {
+      // 浏览器会自动退出指针锁定
+    }
+  });
+
+  canvas.addEventListener("mousedown", function (e) {
+    if (phase === "paused") { requestLock(); return; }
+    if (e.button === 0) onClick();
+  });
+
+  // =====================================================================
+  // 设置页交互
+  // =====================================================================
+  function readCfg() {
+    cfg.dpi = Math.max(100, +document.getElementById("inDpi").value || 800);
+    cfg.sens = Math.max(0.01, +document.getElementById("inSens").value || 0.35);
+    cfg.gameK = +document.getElementById("inGame").value;
+    cfg.count = +document.getElementById("inCount").value;
+    cfg.sizeDeg = +document.getElementById("inSize").value;
+    cfg.fovH = Math.max(70, Math.min(120, +document.getElementById("inFov").value || 103));
+  }
+
+  function refreshDerived() {
+    readCfg();
+    document.getElementById("dEdpi").textContent = Math.round(cfg.dpi * cfg.sens);
+    document.getElementById("dCm").textContent = cm360().toFixed(1);
+    document.getElementById("dDeg").textContent = degPerCount().toFixed(4) + "°";
+  }
+
+  ["inDpi", "inSens", "inGame", "inFov"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", refreshDerived);
+    document.getElementById(id).addEventListener("change", refreshDerived);
+  });
+  refreshDerived();
+
+  document.getElementById("btnStart").addEventListener("click", function () {
+    readCfg();
+    history = [];
+    startRound(cfg.sens);
+  });
+
+  document.getElementById("btnNext").addEventListener("click", function () {
+    startRound(lastSens);
+  });
+
+  document.getElementById("btnRestart").addEventListener("click", function () {
+    history.pop();
+    round = history.length + 1;
+    startRound(cfg.sens);
+  });
+
+  // =====================================================================
+  // 主循环
+  // =====================================================================
+  loop();
+
+})();
+</script>
+</body>
+</html>

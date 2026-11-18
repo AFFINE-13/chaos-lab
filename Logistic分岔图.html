@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Logistic 分岔图 · 通往混沌之路</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#05070d; color:#cfe9ff;
+               font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  canvas { display:block; }
+  #ui { position:fixed; top:16px; left:18px; background:rgba(8,16,28,.84);
+        border:1px solid rgba(0,190,255,.22); border-radius:10px; padding:12px 15px;
+        font-size:13px; line-height:1.8; backdrop-filter:blur(6px); }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; color:#7fe3ff; }
+  .row { display:flex; justify-content:space-between; gap:16px; }
+  .k { color:#6b8ba8; } .v { font-variant-numeric:tabular-nums; color:#d7f2ff; }
+  #hint { position:fixed; bottom:14px; left:18px; font-size:12px; color:#4d6f8a; }
+  #loading { position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+             font-size:14px; color:#7fe3ff; letter-spacing:.1em; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>Logistic 分岔图</h1>
+  <div class="row"><span class="k">模型</span><span class="v">x ← r·x·(1−x)</span></div>
+  <div class="row"><span class="k">r 范围</span><span class="v">2.4 – 4.0</span></div>
+  <div class="row"><span class="k">鼠标处的 r</span><span class="v" id="rv">—</span></div>
+</div>
+<div id="hint">横轴 r · 纵轴 x 的稳定取值 · 竖线越密说明周期越长</div>
+<div id="loading">计算中…</div>
+
+<script>
+(function () {
+  "use strict";
+  var canvas = document.getElementById("c");
+  var ctx = canvas.getContext("2d");
+  var W = 0, H = 0, DPR = 1;
+  var R_MIN = 2.4, R_MAX = 4.0;
+  var PAD_L = 60, PAD_R = 30, PAD_T = 70, PAD_B = 50;
+
+  var plotX = 0, plotY = 0, plotW = 0, plotH = 0;
+  var mouseX = -1;
+
+  function palette(t) {
+    // 0 -> 深蓝, 0.45 -> 青, 0.75 -> 品红, 1 -> 白
+    var r, g, b;
+    if (t < 0.45) {
+      var u = t / 0.45;
+      r = 10 + u * 0; g = 30 + u * 190; b = 70 + u * 185;
+    } else if (t < 0.75) {
+      var u2 = (t - 0.45) / 0.30;
+      r = 10 + u2 * 245; g = 220 - u2 * 160; b = 255 - u2 * 115;
+    } else {
+      var u3 = (t - 0.75) / 0.25;
+      r = 255; g = 60 + u3 * 195; b = 140 + u3 * 115;
+    }
+    return [r | 0, g | 0, b | 0];
+  }
+
+  function render() {
+    var w = canvas.width, h = canvas.height;
+    var img = ctx.createImageData(w, h);
+    var dens = new Float32Array(w * h);
+
+    var px0 = Math.round(PAD_L * DPR);
+    var px1 = Math.round((PAD_L + plotW) * DPR);
+    var py0 = Math.round(PAD_T * DPR);
+    var py1 = Math.round((PAD_T + plotH) * DPR);
+
+    var maxD = 0;
+
+    for (var px = px0; px < px1; px++) {
+      var r = R_MIN + (R_MAX - R_MIN) * ((px - px0) / (px1 - px0 - 1));
+      var x = 0.5;
+      // 丢弃暂态
+      for (var i = 0; i < 1200; i++) x = r * x * (1 - x);
+      // 记录稳态
+      for (var j = 0; j < 450; j++) {
+        x = r * x * (1 - x);
+        var py = Math.round(py0 + (1 - x) * (py1 - py0 - 1));
+        if (py < py0 || py >= py1) continue;
+        var idx = py * w + px;
+        dens[idx] += 1;
+        if (dens[idx] > maxD) maxD = dens[idx];
+      }
+    }
+
+    var logMax = Math.log(1 + maxD);
+    for (var y = 0; y < h; y++) {
+      for (var xx = 0; xx < w; xx++) {
+        var k = (y * w + xx) * 4;
+        var d = dens[y * w + xx];
+        if (d === 0) {
+          img.data[k] = 5; img.data[k + 1] = 7; img.data[k + 2] = 13; img.data[k + 3] = 255;
+        } else {
+          var t = Math.log(1 + d) / logMax;
+          t = Math.pow(t, 0.42);
+          var c = palette(Math.min(1, t));
+          img.data[k] = c[0]; img.data[k + 1] = c[1]; img.data[k + 2] = c[2]; img.data[k + 3] = 255;
+        }
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+
+    // 坐标轴
+    ctx.strokeStyle = "rgba(90,150,190,.45)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px0, py0); ctx.lineTo(px0, py1); ctx.lineTo(px1, py1);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(140,190,220,.8)";
+    ctx.font = (12 * DPR) + "px Consolas, monospace";
+    for (var rr = 2.4; rr <= 4.001; rr += 0.2) {
+      var ax = px0 + (rr - R_MIN) / (R_MAX - R_MIN) * (px1 - px0);
+      ctx.fillText(rr.toFixed(1), ax - 9 * DPR, py1 + 20 * DPR);
+    }
+    for (var vv = 0; vv <= 1.001; vv += 0.5) {
+      var ay = py0 + (1 - vv) * (py1 - py0);
+      ctx.fillText(vv.toFixed(1), px0 - 32 * DPR, ay + 4 * DPR);
+    }
+
+    ctx.fillStyle = "rgba(127,227,255,.85)";
+    ctx.font = (13 * DPR) + "px 'Microsoft YaHei', sans-serif";
+    ctx.fillText("r", (px0 + px1) / 2, py1 + 40 * DPR);
+    ctx.save();
+    ctx.translate(px0 - 46 * DPR, (py0 + py1) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText("x 的稳定取值", 0, 0);
+    ctx.restore();
+
+    // 标注分岔点
+    var marks = [
+      { r: 3.0, t: "周期 2" },
+      { r: 3.449, t: "周期 4" },
+      { r: 3.5699, t: "混沌起点" }
+    ];
+    ctx.fillStyle = "rgba(255,90,150,.9)";
+    ctx.font = (11 * DPR) + "px 'Microsoft YaHei', sans-serif";
+    marks.forEach(function (m) {
+      var mx = px0 + (m.r - R_MIN) / (R_MAX - R_MIN) * (px1 - px0);
+      ctx.beginPath();
+      ctx.moveTo(mx, py0);
+      ctx.lineTo(mx, py0 - 8 * DPR);
+      ctx.strokeStyle = "rgba(255,90,150,.6)";
+      ctx.stroke();
+      ctx.fillText(m.t, mx - 20 * DPR, py0 - 14 * DPR);
+    });
+
+    document.getElementById("loading").style.display = "none";
+  }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    plotX = PAD_L; plotY = PAD_T;
+    plotW = W - PAD_L - PAD_R;
+    plotH = H - PAD_T - PAD_B;
+    document.getElementById("loading").style.display = "block";
+    setTimeout(render, 30);
+  }
+
+  canvas.addEventListener("mousemove", function (e) {
+    var px0 = PAD_L * DPR, px1 = (PAD_L + plotW) * DPR;
+    var mx = e.clientX * DPR;
+    if (mx < px0 || mx > px1) { document.getElementById("rv").textContent = "—"; return; }
+    var r = R_MIN + (R_MAX - R_MIN) * ((mx - px0) / (px1 - px0 - 1));
+    document.getElementById("rv").textContent = r.toFixed(5);
+  });
+
+  window.addEventListener("resize", resize);
+  resize();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>三体演算 · Three-Body Problem</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#05070d; color:#cfe9ff;
+               font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  canvas { display:block; }
+  #ui { position:fixed; top:16px; left:18px; background:rgba(8,16,28,.85);
+        border:1px solid rgba(0,190,255,.22); border-radius:10px; padding:12px 15px;
+        font-size:13px; line-height:1.85; backdrop-filter:blur(6px); min-width:250px; }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; color:#7fe3ff; }
+  .row { display:flex; justify-content:space-between; gap:14px; }
+  .k { color:#6b8ba8; } .v { font-variant-numeric:tabular-nums; color:#d7f2ff; }
+  #btns { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+  button { background:rgba(0,160,230,.12); border:1px solid rgba(0,190,255,.35);
+           color:#9fe4ff; border-radius:6px; padding:5px 11px; font-size:12px; cursor:pointer; }
+  button:hover { background:rgba(0,190,255,.22); }
+  button.on { background:rgba(0,220,255,.3); color:#eaffff; }
+  #hint { position:fixed; bottom:14px; left:18px; font-size:12px; color:#4d6f8a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>三体演算</h1>
+  <div class="row"><span class="k">模式</span><span class="v" id="mode">随机混沌</span></div>
+  <div class="row"><span class="k">演化时间</span><span class="v" id="t">0.0</span></div>
+  <div class="row"><span class="k">重启次数</span><span class="v" id="rc">0</span></div>
+  <div class="row"><span class="k">能量</span><span class="v" id="e">—</span></div>
+  <div id="btns">
+    <button id="bRand" class="on">随机混沌</button>
+    <button id="bFig">8 字形</button>
+    <button id="bReset">重新开始</button>
+  </div>
+</div>
+<div id="hint">三个等质量天体的互相引力 · 轨迹一旦逃逸就自动重启</div>
+
+<script>
+(function () {
+  "use strict";
+  var canvas = document.getElementById("c");
+  var ctx = canvas.getContext("2d");
+  var W = 0, H = 0, DPR = 1;
+  var CX = 0, CY = 0, SCALE = 100;
+
+  var DT = 0.0018;
+  var SUB = 8;
+  var MAXTRAIL = 2400;
+  var ESCAPE = 5.5;
+
+  var COLORS = ["#00d4ff", "#ff3c8c", "#ffb020"];
+  var s;                 // 12 维状态
+  var trails;
+  var elapsed = 0;
+  var restarts = 0;
+  var mode = "rand";
+  var cooldown = 0;
+
+  // ---- 物理 --------------------------------------------------------------
+  function deriv(st) {
+    var d = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (var i = 0; i < 3; i++) {
+      d[i * 2]     = st[6 + i * 2];
+      d[i * 2 + 1] = st[7 + i * 2];
+    }
+    for (var a = 0; a < 3; a++) {
+      var ax = 0, ay = 0;
+      for (var b = 0; b < 3; b++) {
+        if (a === b) continue;
+        var dx = st[b * 2] - st[a * 2];
+        var dy = st[b * 2 + 1] - st[a * 2 + 1];
+        var r2 = dx * dx + dy * dy + 1e-6;
+        var inv = 1 / (r2 * Math.sqrt(r2));
+        ax += dx * inv;
+        ay += dy * inv;
+      }
+      d[6 + a * 2]     = ax;
+      d[7 + a * 2] = ay;
+    }
+    return d;
+  }
+
+  function addK(st, k, d) {
+    var o = st.slice();
+    for (var i = 0; i < 12; i++) o[i] += k * d[i];
+    return o;
+  }
+
+  function rk4(st, dt) {
+    var k1 = deriv(st);
+    var k2 = deriv(addK(st, dt / 2, k1));
+    var k3 = deriv(addK(st, dt / 2, k2));
+    var k4 = deriv(addK(st, dt, k3));
+    var o = st.slice();
+    for (var i = 0; i < 12; i++) {
+      o[i] += dt / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]);
+    }
+    return o;
+  }
+
+  // ---- 初始条件 ----------------------------------------------------------
+  function initFigureEight() {
+    var p = 0.97000436, q = -0.24308753;
+    var vx = 0.93240737 / 2, vy = 0.86473146 / 2;
+    return [
+      p, q,
+      -p, -q,
+      0, 0,
+      vx, vy,
+      vx, vy,
+      -2 * vx, -2 * vy
+    ];
+  }
+
+  function initRandom() {
+    var out = new Array(12);
+    var px = [0, 0, 0], py = [0, 0, 0], vx = [0, 0, 0], vy = [0, 0, 0];
+    var vsum = [0, 0];
+    for (var i = 0; i < 3; i++) {
+      var ang = Math.random() * Math.PI * 2;
+      var rad = 0.5 + Math.random() * 1.1;
+      px[i] = Math.cos(ang) * rad;
+      py[i] = Math.sin(ang) * rad;
+      vx[i] = (Math.random() - 0.5) * 0.9;
+      vy[i] = (Math.random() - 0.5) * 0.9;
+      vsum[0] += vx[i]; vsum[1] += vy[i];
+    }
+    // 质心动量为零
+    for (var j = 0; j < 3; j++) { vx[j] -= vsum[0] / 3; vy[j] -= vsum[1] / 3; }
+    for (var k = 0; k < 3; k++) {
+      out[k * 2] = px[k]; out[k * 2 + 1] = py[k];
+      out[6 + k * 2] = vx[k]; out[7 + k * 2] = vy[k];
+    }
+    return out;
+  }
+
+  function reset(silent) {
+    s = (mode === "fig") ? initFigureEight() : initRandom();
+    trails = [[], [], []];
+    elapsed = 0;
+    if (!silent) restarts++;
+    document.getElementById("rc").textContent = restarts;
+    document.getElementById("mode").textContent =
+      mode === "fig" ? "8 字形稳定解" : "随机混沌";
+  }
+
+  // ---- 绘制 --------------------------------------------------------------
+  function toScreen(x, y) {
+    return [CX + x * SCALE, CY + y * SCALE];
+  }
+
+  function energy(st) {
+    var ke = 0, pe = 0;
+    for (var i = 0; i < 3; i++) {
+      ke += 0.5 * (st[6 + i * 2] ** 2 + st[7 + i * 2] ** 2);
+    }
+    for (var a = 0; a < 3; a++) {
+      for (var b = a + 1; b < 3; b++) {
+        var dx = st[a * 2] - st[b * 2];
+        var dy = st[a * 2 + 1] - st[b * 2 + 1];
+        pe -= 1 / Math.sqrt(dx * dx + dy * dy + 1e-6);
+      }
+    }
+    return ke + pe;
+  }
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    CX = W * 0.5; CY = H * 0.52;
+    SCALE = Math.min(W, H) / 9.5;
+    reset(true);
+  }
+
+  function drawTrail(tr, color, width, alpha) {
+    if (tr.length < 2) return;
+    ctx.beginPath();
+    var p = toScreen(tr[0][0], tr[0][1]);
+    ctx.moveTo(p[0], p[1]);
+    for (var i = 1; i < tr.length; i++) {
+      p = toScreen(tr[i][0], tr[i][1]);
+      ctx.lineTo(p[0], p[1]);
+    }
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = width;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function frame() {
+    requestAnimationFrame(frame);
+
+    if (cooldown > 0) {
+      cooldown--;
+      if (cooldown === 0) reset(false);
+    } else {
+      for (var i = 0; i < SUB; i++) {
+        s = rk4(s, DT);
+        elapsed += DT;
+      }
+      for (var b = 0; b < 3; b++) {
+        trails[b].push([s[b * 2], s[b * 2 + 1]]);
+        if (trails[b].length > MAXTRAIL) trails[b].shift();
+        // 逃逸检测
+        if (Math.hypot(s[b * 2], s[b * 2 + 1]) > ESCAPE && cooldown === 0) {
+          cooldown = 45;
+        }
+      }
+    }
+
+    ctx.fillStyle = "#05070d";
+    ctx.fillRect(0, 0, W, H);
+
+    // 网格
+    ctx.strokeStyle = "rgba(40,70,100,.10)";
+    ctx.lineWidth = 1;
+    for (var x = CX % 60; x < W; x += 60) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (var y = CY % 60; y < H; y += 60) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    // 轨迹
+    for (var i2 = 0; i2 < 3; i2++) {
+      drawTrail(trails[i2], COLORS[i2], 1.2, 0.5);
+    }
+
+    // 天体
+    for (var i3 = 0; i3 < 3; i3++) {
+      var p = toScreen(s[i3 * 2], s[i3 * 2 + 1]);
+      var g = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], 46);
+      g.addColorStop(0, COLORS[i3]);
+      g.addColorStop(0.25, COLORS[i3] + "88");
+      g.addColorStop(1, COLORS[i3] + "00");
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 46, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], 7, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS[i3];
+      ctx.fill();
+    }
+
+    document.getElementById("t").textContent = elapsed.toFixed(1);
+    document.getElementById("e").textContent = energy(s).toFixed(4);
+  }
+
+  // ---- 按钮 --------------------------------------------------------------
+  document.getElementById("bRand").addEventListener("click", function () {
+    mode = "rand";
+    this.classList.add("on");
+    document.getElementById("bFig").classList.remove("on");
+    reset(false);
+  });
+  document.getElementById("bFig").addEventListener("click", function () {
+    mode = "fig";
+    this.classList.add("on");
+    document.getElementById("bRand").classList.remove("on");
+    reset(false);
+  });
+  document.getElementById("bReset").addEventListener("click", function () {
+    reset(false);
+  });
+
+  window.addEventListener("resize", resize);
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

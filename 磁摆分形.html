@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>磁摆分形 · 吸引域</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#05070d; color:#cfe9ff;
+               font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  canvas { display:block; }
+  #ui { position:fixed; top:16px; left:18px; background:rgba(8,16,28,.85);
+        border:1px solid rgba(0,190,255,.22); border-radius:10px; padding:12px 15px;
+        font-size:13px; line-height:1.8; backdrop-filter:blur(6px); min-width:230px; }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; color:#7fe3ff; }
+  .row { display:flex; justify-content:space-between; gap:14px; }
+  .k { color:#6b8ba8; } .v { font-variant-numeric:tabular-nums; color:#d7f2ff; }
+  #bar { height:4px; background:rgba(0,190,255,.15); border-radius:2px; margin-top:9px; overflow:hidden; }
+  #barIn { height:100%; width:0%; background:linear-gradient(90deg,#00d4ff,#ff3c8c); transition:width .1s; }
+  #hint { position:fixed; bottom:14px; left:18px; font-size:12px; color:#4d6f8a; }
+  .sw { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>磁摆吸引域</h1>
+  <div class="row"><span class="k">网格</span><span class="v" id="gs">300 × 300</span></div>
+  <div class="row"><span class="k">进度</span><span class="v" id="pg">0%</span></div>
+  <div id="bar"><div id="barIn"></div></div>
+  <div style="margin-top:8px;font-size:12px;color:#7fa3bb">
+    <span class="sw" style="background:#00d4ff"></span>磁铁 A
+    <span class="sw" style="background:#ff3c8c;margin-left:10px"></span>磁铁 B
+    <span class="sw" style="background:#ffb020;margin-left:10px"></span>磁铁 C
+  </div>
+</div>
+<div id="hint">每个像素 = 一个起始位置 · 颜色 = 摆最终停在哪块磁铁下</div>
+
+<script>
+(function () {
+  "use strict";
+  var canvas = document.getElementById("c");
+  var ctx = canvas.getContext("2d");
+
+  var N = 300;                 // 网格边长
+  var RANGE = 1.55;            // 坐标范围 [-RANGE, RANGE]
+  var MAX_STEPS = 700;
+  var DT = 0.014;
+  var DAMP = 0.9965;
+  var EPS = 0.012;
+
+  var MAGNETS = [
+    { x: 0, y: 1.0,  c: [0, 212, 255] },
+    { x: Math.cos(Math.PI * 7 / 6), y: Math.sin(Math.PI * 7 / 6), c: [255, 60, 140] },
+    { x: Math.cos(Math.PI * 11 / 6), y: Math.sin(Math.PI * 11 / 6), c: [255, 176, 32] }
+  ];
+
+  var img = null, buf = null;
+  var row = 0;
+  var cellPx = 1, ox = 0, oy = 0;
+  var startTime = 0;
+
+  function simulate(x0, y0) {
+    var x = x0, y = y0, vx = 0, vy = 0;
+    for (var s = 0; s < MAX_STEPS; s++) {
+      var ax = 0, ay = 0;
+      for (var i = 0; i < 3; i++) {
+        var dx = MAGNETS[i].x - x;
+        var dy = MAGNETS[i].y - y;
+        var d2 = dx * dx + dy * dy + EPS;
+        var inv = 1 / (d2 * Math.sqrt(d2));
+        ax += dx * inv;
+        ay += dy * inv;
+      }
+      vx = (vx + ax * DT) * DAMP;
+      vy = (vy + ay * DT) * DAMP;
+      x += vx * DT;
+      y += vy * DT;
+
+      // 检查是否已经吸附
+      for (var j = 0; j < 3; j++) {
+        var ddx = MAGNETS[j].x - x, ddy = MAGNETS[j].y - y;
+        var dd = ddx * ddx + ddy * ddy;
+        if (dd < 0.0035 && (vx * vx + vy * vy) < 0.0008) {
+          return { m: j, steps: s };
+        }
+      }
+    }
+    // 没吸附：归给最近的
+    var best = 0, bd = Infinity;
+    for (var k = 0; k < 3; k++) {
+      var d = (MAGNETS[k].x - x) ** 2 + (MAGNETS[k].y - y) ** 2;
+      if (d < bd) { bd = d; best = k; }
+    }
+    return { m: best, steps: MAX_STEPS };
+  }
+
+  function computeRow(r) {
+    for (var col = 0; col < N; col++) {
+      var x0 = -RANGE + (2 * RANGE) * (col / (N - 1));
+      var y0 = -RANGE + (2 * RANGE) * (r / (N - 1));
+      var res = simulate(x0, y0);
+      var c = MAGNETS[res.m].c;
+
+      // 吸附越快越亮，加一点层次
+      var t = 1 - Math.min(1, res.steps / 380);
+      var f = 0.28 + 0.72 * Math.pow(t, 1.4);
+
+      var px = col * cellPx + ox;
+      var py = r * cellPx + oy;
+      for (var dy = 0; dy < cellPx; dy++) {
+        for (var dx = 0; dx < cellPx; dx++) {
+          var idx = ((py + dy) * canvas.width + (px + dx)) * 4;
+          buf.data[idx]     = c[0] * f;
+          buf.data[idx + 1] = c[1] * f;
+          buf.data[idx + 2] = c[2] * f;
+          buf.data[idx + 3] = 255;
+        }
+      }
+    }
+  }
+
+  function layout() {
+    var DPR = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(window.innerWidth * DPR);
+    canvas.height = Math.floor(window.innerHeight * DPR);
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+
+    cellPx = Math.max(1, Math.floor(Math.min(canvas.width, canvas.height) * 0.92 / N));
+    var side = cellPx * N;
+    ox = Math.floor((canvas.width - side) / 2);
+    oy = Math.floor((canvas.height - side) / 2);
+
+    buf = ctx.createImageData(canvas.width, canvas.height);
+    for (var i = 0; i < buf.data.length; i += 4) {
+      buf.data[i] = 5; buf.data[i + 1] = 7; buf.data[i + 2] = 13; buf.data[i + 3] = 255;
+    }
+    row = 0;
+    startTime = performance.now();
+  }
+
+  function drawOverlay() {
+    // 磁铁位置标记
+    for (var i = 0; i < 3; i++) {
+      var m = MAGNETS[i];
+      var cx = ox + ((m.x + RANGE) / (2 * RANGE)) * (N - 1) * cellPx + cellPx / 2;
+      var cy = oy + ((m.y + RANGE) / (2 * RANGE)) * (N - 1) * cellPx + cellPx / 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cellPx * 2.2, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,255,255,.75)";
+      ctx.lineWidth = Math.max(1, cellPx * 0.35);
+      ctx.stroke();
+    }
+  }
+
+  function loop() {
+    requestAnimationFrame(loop);
+
+    if (row < N) {
+      var budget = 2;   // 每帧算几行
+      while (budget-- > 0 && row < N) {
+        computeRow(row);
+        row++;
+      }
+      ctx.putImageData(buf, 0, 0);
+      drawOverlay();
+
+      var p = Math.round(100 * row / N);
+      document.getElementById("pg").textContent = p + "%";
+      document.getElementById("barIn").style.width = p + "%";
+    }
+  }
+
+  window.addEventListener("resize", function () {
+    layout();
+  });
+
+  document.getElementById("gs").textContent = N + " × " + N;
+  layout();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

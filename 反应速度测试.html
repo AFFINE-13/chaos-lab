@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>反应速度测试</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    user-select: none; cursor: pointer;
+  }
+
+  #stage {
+    position: fixed; inset: 0;
+    display: grid; place-items: center;
+    background: #0b0f17;
+    transition: background .12s ease;
+  }
+  #stage.waiting  { background: #1a1410; }
+  #stage.ready    { background: #12813f; }
+  #stage.early    { background: #8a5a00; }
+  #stage.result   { background: #0b0f17; }
+
+  #center {
+    text-align: center; color: #e9f2ff;
+    padding: 20px 32px;
+    pointer-events: none;
+  }
+  #big {
+    font-size: clamp(30px, 7vw, 84px);
+    font-weight: 700; letter-spacing: .02em;
+    line-height: 1.15;
+    text-shadow: 0 0 40px rgba(0,0,0,.35);
+  }
+  #sub {
+    margin-top: 14px;
+    font-size: clamp(13px, 1.6vw, 18px);
+    color: rgba(233,242,255,.65);
+    letter-spacing: .05em;
+  }
+  #stage.ready #big { color: #fff; }
+  #stage.early #big { color: #ffe9b0; }
+
+  /* 统计面板 */
+  #panel {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: rgba(6,11,20,.86);
+    border-top: 1px solid rgba(90,140,200,.18);
+    padding: 14px 22px 16px;
+    font-size: 13px; color: #b9cde6;
+    backdrop-filter: blur(8px);
+  }
+  #stats {
+    display: flex; gap: 28px; flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .s { display: flex; flex-direction: column; gap: 2px; }
+  .s .k { font-size: 11px; color: #5d7593; letter-spacing: .04em; }
+  .s .v { font-size: 19px; font-weight: 600; color: #e6f0ff;
+          font-variant-numeric: tabular-nums; }
+  .s .v small { font-size: 11px; font-weight: 400; color: #6b8ba8; margin-left: 2px; }
+
+  #hist {
+    display: flex; align-items: flex-end; gap: 2px;
+    height: 46px;
+  }
+  #hist .bar {
+    flex: 1; min-width: 2px;
+    background: linear-gradient(180deg, #4fc3ff, #1f5fa8);
+    border-radius: 1px 1px 0 0;
+    transition: height .18s ease;
+  }
+  #histLabels {
+    display: flex; justify-content: space-between;
+    font-size: 10px; color: #44607a; margin-top: 4px;
+  }
+
+  #hint {
+    position: fixed; top: 16px; left: 0; right: 0;
+    text-align: center; font-size: 12px; color: rgba(200,220,240,.35);
+    letter-spacing: .05em; pointer-events: none;
+  }
+
+  #reset {
+    position: fixed; top: 14px; right: 16px;
+    background: rgba(90,140,200,.12);
+    border: 1px solid rgba(120,170,255,.3);
+    color: #a9c8ff; border-radius: 6px;
+    padding: 6px 14px; font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  #reset:hover { background: rgba(120,170,255,.24); }
+</style>
+</head>
+<body>
+
+<div id="stage" class="idle">
+  <div id="center">
+    <div id="big">反应速度测试</div>
+    <div id="sub">点击开始 · 等屏幕变绿后立刻点击</div>
+  </div>
+</div>
+
+<div id="hint">也可以用空格键</div>
+<button id="reset">清空记录</button>
+
+<div id="panel">
+  <div id="stats">
+    <div class="s"><span class="k">次数</span><span class="v" id="sCount">0</span></div>
+    <div class="s"><span class="k">平均</span><span class="v" id="sMean">—</span></div>
+    <div class="s"><span class="k">中位数</span><span class="v" id="sMed">—</span></div>
+    <div class="s"><span class="k">最好</span><span class="v" id="sBest">—</span></div>
+    <div class="s"><span class="k">最差</span><span class="v" id="sWorst">—</span></div>
+    <div class="s"><span class="k">标准差</span><span class="v" id="sSd">—</span></div>
+    <div class="s"><span class="k">抢跑</span><span class="v" id="sFail">0</span></div>
+  </div>
+  <div id="hist"></div>
+  <div id="histLabels"><span>快</span><span>反应时间分布</span><span>慢</span></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var stage = document.getElementById("stage");
+  var big = document.getElementById("big");
+  var sub = document.getElementById("sub");
+
+  var state = "idle";        // idle | waiting | ready | early | result
+  var readyAt = 0;
+  var timer = null;
+  var lockUntil = 0;         // 防连点
+
+  var results = [];
+  var falseStarts = 0;
+
+  var MIN_DELAY = 900;
+  var MAX_DELAY = 2800;
+
+  // ---------------------------------------------------------------- 状态
+  function setState(s) {
+    state = s;
+    stage.className = s;
+  }
+
+  function show(bigText, subText) {
+    big.innerHTML = bigText;
+    sub.innerHTML = subText || "";
+  }
+
+  // ---------------------------------------------------------------- 流程
+  function startWaiting() {
+    setState("waiting");
+    show("等待…", "屏幕变绿时再点");
+    lockUntil = performance.now() + 120;
+
+    var delay = MIN_DELAY + Math.random() * (MAX_DELAY - MIN_DELAY);
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      setState("ready");
+      show("点！", "");
+      readyAt = performance.now();
+      lockUntil = performance.now() + 120;
+    }, delay);
+  }
+
+  function handleReady() {
+    var rt = performance.now() - readyAt;
+    results.push(rt);
+
+    var verdict;
+    if (rt < 180) verdict = "极快";
+    else if (rt < 220) verdict = "很快";
+    else if (rt < 260) verdict = "正常";
+    else if (rt < 320) verdict = "偏慢";
+    else verdict = "较慢";
+
+    setState("result");
+    show(rt.toFixed(0) + " <span style='font-size:.5em'>ms</span>", verdict + " · 点击继续");
+    renderStats();
+    lockUntil = performance.now() + 350;
+  }
+
+  function handleEarly() {
+    falseStarts++;
+    clearTimeout(timer);
+    setState("early");
+    show("太早了", "还没变绿 · 点击重来");
+    renderStats();
+    lockUntil = performance.now() + 400;
+  }
+
+  // ---------------------------------------------------------------- 交互
+  function trigger() {
+    var now = performance.now();
+    if (now < lockUntil) return;
+
+    if (state === "idle" || state === "result" || state === "early") {
+      startWaiting();
+    } else if (state === "waiting") {
+      handleEarly();
+    } else if (state === "ready") {
+      handleReady();
+    }
+  }
+
+  stage.addEventListener("mousedown", function (e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    trigger();
+  });
+
+  stage.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    trigger();
+  }, { passive: false });
+
+  window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code === "Enter") {
+      e.preventDefault();
+      trigger();
+    }
+  });
+
+  window.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  // ---------------------------------------------------------------- 统计
+  function renderStats() {
+    var n = results.length;
+    document.getElementById("sCount").textContent = n;
+    document.getElementById("sFail").textContent = falseStarts;
+
+    if (n === 0) {
+      ["sMean", "sMed", "sBest", "sWorst", "sSd"].forEach(function (id) {
+        document.getElementById(id).textContent = "—";
+      });
+      document.getElementById("hist").innerHTML = "";
+      return;
+    }
+
+    var sorted = results.slice().sort(function (a, b) { return a - b; });
+    var sum = 0;
+    for (var i = 0; i < n; i++) sum += results[i];
+    var mean = sum / n;
+    var median = (n % 2 === 1)
+      ? sorted[(n - 1) / 2]
+      : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+    var vsum = 0;
+    for (var j = 0; j < n; j++) vsum += (results[j] - mean) * (results[j] - mean);
+    var sd = Math.sqrt(vsum / n);
+
+    function set(id, val) {
+      document.getElementById(id).innerHTML =
+        val.toFixed(0) + " <small>ms</small>";
+    }
+    set("sMean", mean);
+    set("sMed", median);
+    set("sBest", sorted[0]);
+    set("sWorst", sorted[n - 1]);
+    set("sSd", sd);
+
+    renderHist(sorted, mean, sd);
+  }
+
+  function renderHist(sorted, mean, sd) {
+    var hist = document.getElementById("hist");
+    var lo = Math.max(0, Math.floor((sorted[0] - 20) / 20) * 20);
+    var hi = Math.ceil((sorted[sorted.length - 1] + 20) / 20) * 20;
+    if (hi - lo < 120) hi = lo + 120;
+
+    var buckets = [];
+    for (var b = lo; b < hi; b += 20) buckets.push(0);
+    for (var i = 0; i < sorted.length; i++) {
+      var idx = Math.floor((sorted[i] - lo) / 20);
+      if (idx < 0) idx = 0;
+      if (idx >= buckets.length) idx = buckets.length - 1;
+      buckets[idx]++;
+    }
+    var maxC = 0;
+    for (var k = 0; k < buckets.length; k++) if (buckets[k] > maxC) maxC = buckets[k];
+
+    hist.innerHTML = "";
+    for (var m = 0; m < buckets.length; m++) {
+      var d = document.createElement("div");
+      d.className = "bar";
+      var h = maxC === 0 ? 0 : (buckets[m] / maxC) * 100;
+      d.style.height = Math.max(2, h) + "%";
+      d.style.opacity = buckets[m] === 0 ? 0.18 : 1;
+      d.title = (lo + m * 20) + "–" + (lo + m * 20 + 20) + " ms : " + buckets[m] + " 次";
+      hist.appendChild(d);
+    }
+  }
+
+  // ---------------------------------------------------------------- 重置
+  document.getElementById("reset").addEventListener("mousedown", function (e) {
+    e.stopPropagation();
+  });
+  document.getElementById("reset").addEventListener("click", function (e) {
+    e.stopPropagation();
+    results = [];
+    falseStarts = 0;
+    renderStats();
+    clearTimeout(timer);
+    setState("idle");
+    show("反应速度测试", "点击开始 · 等屏幕变绿后立刻点击");
+    lockUntil = 0;
+  });
+
+  renderStats();
+})();
+</script>
+</body>
+</html>

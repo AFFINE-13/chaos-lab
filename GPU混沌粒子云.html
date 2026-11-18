@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>混沌粒子云 · 12 万粒子 Lorenz</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#02040a; color:#cfe9ff;
+               font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  canvas { display:block; cursor:grab; }
+  canvas:active { cursor:grabbing; }
+  #ui { position:fixed; top:16px; left:18px; background:rgba(6,14,26,.8);
+        border:1px solid rgba(0,190,255,.22); border-radius:10px; padding:12px 15px;
+        font-size:13px; line-height:1.85; backdrop-filter:blur(6px); min-width:250px;
+        pointer-events:none; }
+  #ui h1 { margin:0 0 6px; font-size:14px; font-weight:600; color:#7fe3ff; }
+  .row { display:flex; justify-content:space-between; gap:14px; }
+  .k { color:#6b8ba8; } .v { font-variant-numeric:tabular-nums; color:#d7f2ff; }
+  #hint { position:fixed; bottom:14px; left:18px; font-size:12px; color:#3f5f78; }
+  #loading { position:fixed; inset:0; display:grid; place-items:center;
+             background:#02040a; font-size:15px; color:#7fe3ff; letter-spacing:.1em; z-index:9; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <h1>混沌粒子云</h1>
+  <div class="row"><span class="k">粒子数</span><span class="v" id="np">—</span></div>
+  <div class="row"><span class="k">积分</span><span class="v">RK2 · CPU</span></div>
+  <div class="row"><span class="k">渲染</span><span class="v">WebGL2 · GPU</span></div>
+  <div class="row"><span class="k">帧率</span><span class="v" id="fps">—</span></div>
+  <div class="row"><span class="k">演化时间</span><span class="v" id="st">0</span></div>
+</div>
+<div id="hint">拖动旋转 · 滚轮缩放</div>
+<div id="loading">正在预热粒子…</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("c");
+  var gl = canvas.getContext("webgl2", {
+    antialias: false, alpha: false, depth: false,
+    powerPreference: "high-performance"
+  });
+
+  if (!gl) {
+    document.getElementById("loading").textContent =
+      "你的浏览器不支持 WebGL2，请用 Chrome / Edge 最新版。";
+    return;
+  }
+
+  // ---- 参数 --------------------------------------------------------------
+  var N = 120000;
+  var SIG = 10, RHO = 28, BET = 8 / 3;
+  var DT = 0.004;
+
+  // ---- 数据 --------------------------------------------------------------
+  var pos = new Float32Array(N * 4);
+
+  function initParticles() {
+    for (var i = 0; i < N; i++) {
+      var o = i * 4;
+      // 直接在吸引子包围盒里撒点
+      pos[o]     = (Math.random() - 0.5) * 40;
+      pos[o + 1] = (Math.random() - 0.5) * 40;
+      pos[o + 2] = Math.random() * 50;
+      pos[o + 3] = Math.random();
+    }
+  }
+
+  // ---- 积分 --------------------------------------------------------------
+  function integrate(dt, steps) {
+    for (var s = 0; s < steps; s++) {
+      for (var i = 0; i < N; i++) {
+        var o = i * 4;
+        var x = pos[o], y = pos[o + 1], z = pos[o + 2];
+
+        var k1x = SIG * (y - x);
+        var k1y = x * (RHO - z) - y;
+        var k1z = x * y - BET * z;
+
+        var hx = 0.5 * dt;
+        var mx = x + hx * k1x, my = y + hx * k1y, mz = z + hx * k1z;
+
+        var k2x = SIG * (my - mx);
+        var k2y = mx * (RHO - mz) - my;
+        var k2z = mx * my - BET * mz;
+
+        var nx = x + dt * k2x, ny = y + dt * k2y, nz = z + dt * k2z;
+
+        // 数值发散的粒子拉回吸引子附近
+        if (nx > 60 || nx < -60 || ny > 60 || ny < -60 || nz > 70 || nz < -10 ||
+            nx !== nx || ny !== ny || nz !== nz) {
+          nx = (Math.random() - 0.5) * 10;
+          ny = (Math.random() - 0.5) * 10;
+          nz = 10 + Math.random() * 10;
+        }
+
+        pos[o] = nx; pos[o + 1] = ny; pos[o + 2] = nz;
+      }
+    }
+  }
+
+  // ---- 着色器 ------------------------------------------------------------
+  var DRAW_VS = `#version 300 es
+precision highp float;
+layout(location = 0) in vec4 a_pos;
+
+uniform mat4 u_mvp;
+uniform float u_size;
+
+out vec3 v_col;
+out float v_glow;
+
+void main() {
+  vec4 clip = u_mvp * vec4(a_pos.xyz, 1.0);
+  gl_Position = clip;
+  gl_PointSize = u_size * (2.4 / max(0.6, clip.w));
+
+  float t = clamp(a_pos.z / 48.0, 0.0, 1.0);
+  vec3 c1 = vec3(0.10, 0.62, 1.00);
+  vec3 c2 = vec3(0.45, 0.28, 1.00);
+  vec3 c3 = vec3(1.00, 0.24, 0.58);
+  vec3 col = mix(c1, c2, smoothstep(0.0, 0.55, t));
+  col = mix(col, c3, smoothstep(0.55, 1.0, t));
+
+  float seed = a_pos.w;
+  col = mix(col, vec3(0.75, 0.95, 1.0), seed * 0.30);
+  col *= 0.75 + seed * 0.5;
+
+  v_col = col;
+  v_glow = mix(0.5, 1.0, seed);
+}`;
+
+  var DRAW_FS = `#version 300 es
+precision highp float;
+in vec3 v_col;
+in float v_glow;
+out vec4 fragColor;
+
+void main() {
+  vec2 d = gl_PointCoord - vec2(0.5);
+  float r = length(d);
+  float a = smoothstep(0.5, 0.02, r);
+  a = pow(a, 2.0) * v_glow;
+  fragColor = vec4(v_col, a * 0.40);
+}`;
+
+  function compile(vsSrc, fsSrc) {
+    function sh(t, s) {
+      var o = gl.createShader(t);
+      gl.shaderSource(o, s);
+      gl.compileShader(o);
+      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) {
+        throw new Error(gl.getShaderInfoLog(o) || "compile failed");
+      }
+      return o;
+    }
+    var p = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(p, sh(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(p) || "link failed");
+    }
+    return p;
+  }
+
+  var progDraw;
+  try {
+    progDraw = compile(DRAW_VS, DRAW_FS);
+  } catch (err) {
+    document.getElementById("loading").textContent = "着色器错误：" + err.message;
+    return;
+  }
+
+  // ---- 缓冲 --------------------------------------------------------------
+  var vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
+
+  var vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  // ---- 相机 --------------------------------------------------------------
+  var rotY = 0.10, rotX = 1.52, dist = 3.2;
+  var dragging = false, lastX = 0, lastY = 0, autoSpin = true;
+
+  canvas.addEventListener("mousedown", function (e) {
+    dragging = true; autoSpin = false;
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  window.addEventListener("mouseup", function () { dragging = false; });
+  window.addEventListener("mousemove", function (e) {
+    if (!dragging) return;
+    rotY += (e.clientX - lastX) * 0.006;
+    rotX += (e.clientY - lastY) * 0.006;
+    rotX = Math.max(0.2, Math.min(2.6, rotX));
+    lastX = e.clientX; lastY = e.clientY;
+  });
+  canvas.addEventListener("wheel", function (e) {
+    e.preventDefault();
+    dist *= (1 + Math.sign(e.deltaY) * 0.08);
+    dist = Math.max(1.6, Math.min(9, dist));
+  }, { passive: false });
+
+  // ---- 矩阵 --------------------------------------------------------------
+  function mul(a, b) {
+    var o = new Float32Array(16);
+    for (var c = 0; c < 4; c++) {
+      for (var r = 0; r < 4; r++) {
+        o[c * 4 + r] =
+          a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] +
+          a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+      }
+    }
+    return o;
+  }
+  function persp(fovy, aspect, near, far) {
+    var f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    return new Float32Array([
+      f / aspect, 0, 0, 0, 0, f, 0, 0,
+      0, 0, (far + near) * nf, -1, 0, 0, 2 * far * near * nf, 0
+    ]);
+  }
+  function rotXm(a) {
+    var c = Math.cos(a), s = Math.sin(a);
+    return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
+  }
+  function rotYm(a) {
+    var c = Math.cos(a), s = Math.sin(a);
+    return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]);
+  }
+  function trans(x, y, z) {
+    return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, x,y,z,1]);
+  }
+  function scaleM(s) {
+    return new Float32Array([s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]);
+  }
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // ---- 预热 --------------------------------------------------------------
+  initParticles();
+  integrate(0.015, 1500);     // 约 22.5 个时间单位，让粒子落到吸引子上
+
+  document.getElementById("np").textContent = N.toLocaleString("en-US");
+  document.getElementById("loading").style.display = "none";
+
+  // ---- 主循环 ------------------------------------------------------------
+  var uMvp = gl.getUniformLocation(progDraw, "u_mvp");
+  var uSize = gl.getUniformLocation(progDraw, "u_size");
+  var elapsed = 0;
+  var frames = 0, fpsLast = performance.now();
+  var lastMs = performance.now(), acc = 0;
+  var SIM_MS = 1000 / 60;
+  var SPIN = 0.012;    // 弧度 / 秒
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+
+    var dtMs = Math.min(now - lastMs, 100);
+    lastMs = now;
+
+    if (autoSpin && !dragging) rotY += SPIN * dtMs / 1000;
+
+    acc += dtMs;
+    var steps = 0;
+    while (acc >= SIM_MS && steps < 4) { acc -= SIM_MS; steps++; }
+    if (steps > 0) { integrate(DT, steps); elapsed += DT * steps; }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.clearColor(0.008, 0.016, 0.039, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    var aspect = canvas.width / canvas.height;
+    var view = mul(trans(0, 0, -dist), rotXm(rotX));
+    view = mul(view, rotYm(rotY));
+    view = mul(view, scaleM(0.045));
+    view = mul(view, trans(0, 0, -24));
+    var mvp = mul(persp(0.9, aspect, 0.1, 60.0), view);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.disable(gl.DEPTH_TEST);
+
+    gl.useProgram(progDraw);
+    gl.uniformMatrix4fv(uMvp, false, mvp);
+    gl.uniform1f(uSize, Math.min(canvas.height * 0.0030, 6.0));
+
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.POINTS, 0, N);
+    gl.bindVertexArray(null);
+
+    document.getElementById("st").textContent = elapsed.toFixed(1);
+
+    frames++;
+    if (now - fpsLast > 500) {
+      document.getElementById("fps").textContent =
+        (frames * 1000 / (now - fpsLast)).toFixed(0) + " fps";
+      frames = 0; fpsLast = now;
+    }
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
